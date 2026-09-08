@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.venv/
+venv/
+env/
+
+# Node / Frontend
+node_modules/
+dist/
+.env
+!.env.example
+
+# Databases & local data
+*.db
+*.sqlite
+*.sqlite3
+
+# PlatformIO / Embedded / VS Code
+.pio/
+.vscode/
+compile_commands.json
+
+# Debug images
+*_debug.jpg
+*_debug.png
+
+# OS / System
+.DS_Store
+Thumbs.db
