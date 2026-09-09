@@ -110,7 +110,23 @@ class SimulationEngine:
 
                     # Generate simulated raw sensor readings based on joint profile
                     is_inspecting = (zone_state == "INSPECTING")
-                    raw_data = self._generate_joint_telemetry(jid, is_inspecting)
+                    
+                    from backend.services.serial_service import serial_service
+                    if jid == "J01" and serial_service.connection_status == "CONNECTED":
+                        latest = crud.get_latest_reading(db, "J01")
+                        if latest and latest.temperature is not None:
+                            raw_data = {
+                                "vibration": latest.vibration,
+                                "temperature": latest.temperature,
+                                "hall_event": latest.hall_event,
+                                "hall_event_expected": is_inspecting,
+                                "magnetic_value": latest.magnetic_value,
+                                "vision_score": latest.vision_score or 85.0
+                            }
+                        else:
+                            raw_data = self._generate_joint_telemetry(jid, is_inspecting)
+                    else:
+                        raw_data = self._generate_joint_telemetry(jid, is_inspecting)
 
                     # Apply manual override if specified
                     if jid in self.manual_overrides:

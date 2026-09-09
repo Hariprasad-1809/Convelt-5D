@@ -30,13 +30,14 @@ function SensorStatusRow({ label, sensor, connected }) {
 }
 
 export default function SensorData() {
-  const { joints, lastUpdated, apiConnected, simStatus } = useSimulation();
+  const { joints = {}, lastUpdated, apiConnected, simStatus, hardwareStatus, wsStatus = 'CONNECTING', rawSerialLogs = [] } = useSimulation();
+
   const [selectedJoint, setSelectedJoint] = useState('J01');
   const [selectedSensor, setSelectedSensor] = useState('all');
   const [timeRange, setTimeRange] = useState(1);
   const [statusFilter, setStatusFilter] = useState('all');
 
-  const joint = joints[selectedJoint] ?? Object.values(joints)[0];
+  const joint = joints[selectedJoint] ?? Object.values(joints)[0] ?? {};
 
   // Build raw readings table from live history
   const rawReadings = useMemo(() => {
@@ -61,12 +62,13 @@ export default function SensorData() {
     return tempSt === statusFilter || vibSt === statusFilter;
   });
 
-  const tempHist = joint?.temperatureHistory?.slice(-TIME_RANGES[timeRange].points) ?? [];
-  const vibHist  = joint?.vibrationHistory?.slice(-TIME_RANGES[timeRange].points) ?? [];
+  const timeLimit = TIME_RANGES[timeRange]?.points ?? 30;
+  const tempHist = joint?.temperatureHistory?.slice(-timeLimit) ?? [];
+  const vibHist  = joint?.vibrationHistory?.slice(-timeLimit) ?? [];
 
   // Aggregates
-  const tempVals = tempHist.map(d => d.value);
-  const vibVals  = vibHist.map(d => d.value);
+  const tempVals = tempHist.map(d => d.value).filter(v => typeof v === 'number');
+  const vibVals  = vibHist.map(d => d.value).filter(v => typeof v === 'number');
   const agg = {
     temp: {
       min: tempVals.length ? Math.min(...tempVals).toFixed(1) : '—',
@@ -80,7 +82,7 @@ export default function SensorData() {
     },
   };
 
-  function handleCSVExport() {
+  const handleCSVExport = () => {
     const headers = ['Timestamp', 'Time', 'Joint', 'Temperature (°C)', 'Vibration (m/s²)', 'Hall Event', 'Vision Score'];
     const csvRows = [headers, ...rawReadings.map(r => [r.timestamp, r.time, r.jointId, r.temperature, r.vibration, r.hall_event, r.vision_score])];
     const csv = csvRows.map(r => r.join(',')).join('\n');
@@ -91,9 +93,10 @@ export default function SensorData() {
     a.download = `jointguard_telemetry_${selectedJoint}_${Date.now()}.csv`;
     a.click();
     URL.revokeObjectURL(url);
-  }
+  };
 
   const availableJointIds = Object.keys(joints).length > 0 ? Object.keys(joints) : JOINT_IDS;
+  const isArduinoConnected = (hardwareStatus?.serial_status === 'CONNECTED' || hardwareStatus?.connection_status === 'CONNECTED');
 
   return (
     <div className="page-content">
@@ -107,28 +110,141 @@ export default function SensorData() {
         </button>
       </div>
 
-      {/* Connection Status Bar */}
+      {/* Connection & Hardware Serial Status Bar */}
       <div className="card" style={{ marginBottom: '20px', display: 'flex', flexWrap: 'wrap', gap: '20px', alignItems: 'center' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-          {apiConnected ? <Wifi size={15} color="var(--status-normal)" /> : <WifiOff size={15} color="var(--status-high)" />}
+          {isArduinoConnected ? (
+            <Wifi size={16} color="var(--status-normal)" />
+          ) : (
+            <WifiOff size={16} color="var(--status-high)" />
+          )}
           <div>
-            <div style={{ fontSize: 'var(--text-xs)', fontWeight: 600, color: apiConnected ? 'var(--status-normal)' : 'var(--status-high)' }}>
-              REST Backend {apiConnected ? 'Connected' : 'Offline'}
+            <div style={{ fontSize: 'var(--text-xs)', fontWeight: 700, color: isArduinoConnected ? 'var(--status-normal)' : 'var(--status-high)' }}>
+              ARDUINO UNO {isArduinoConnected ? 'CONNECTED' : 'DISCONNECTED'}
             </div>
             <div style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)' }}>
-              Cycle {simStatus?.current_cycle ?? 0} · 2.0s telemetry polling · J01-J03
+              {hardwareStatus?.port || 'COM4'} @ {hardwareStatus?.baud || 9600} Baud · USB Serial Gateway
             </div>
           </div>
         </div>
+
         <div style={{ width: 1, height: 36, background: 'var(--border-subtle)' }} />
-        <div style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)' }}>
-          <span style={{ color: 'var(--text-secondary)', fontWeight: 600 }}>Active Joints:</span> {availableJointIds.length} Monitored
+
+        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+          {wsStatus === 'CONNECTED' ? <CheckCircle size={14} color="var(--status-normal)" /> : <AlertCircle size={14} color="var(--status-high)" />}
+          <div style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)' }}>
+            <span style={{ color: 'var(--text-secondary)', fontWeight: 600 }}>WebSocket Gateway:</span>{' '}
+            <span style={{ color: wsStatus === 'CONNECTED' ? 'var(--status-normal)' : 'var(--status-high)', fontWeight: 600 }}>
+              {wsStatus === 'CONNECTED' ? 'CONNECTED' : wsStatus === 'CONNECTING' ? 'CONNECTING...' : wsStatus === 'RECONNECTING' ? 'RECONNECTING...' : 'DISCONNECTED'}
+            </span>
+          </div>
         </div>
-        <div style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)' }}>
-          <span style={{ color: 'var(--text-secondary)', fontWeight: 600 }}>Simulation:</span> {simStatus?.is_running ? 'Auto Running' : 'Paused'}
+
+        <div style={{ width: 1, height: 36, background: 'var(--border-subtle)' }} />
+
+        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+          {apiConnected ? <CheckCircle size={14} color="var(--status-normal)" /> : <AlertCircle size={14} color="var(--status-high)" />}
+          <div style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)' }}>
+            <span style={{ color: 'var(--text-secondary)', fontWeight: 600 }}>FastAPI Backend:</span> {apiConnected ? 'Online' : 'Offline'}
+          </div>
         </div>
+
+        <div style={{ width: 1, height: 36, background: 'var(--border-subtle)' }} />
+
+        <div style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)' }}>
+          <span style={{ color: 'var(--text-secondary)', fontWeight: 600 }}>Active Node:</span> {hardwareStatus?.device_id || 'ARDUINO_UNO_01'}
+        </div>
+
         <div style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)', marginLeft: 'auto', fontFamily: 'var(--font-mono)' }}>
-          Last Synced: {lastUpdated ? new Date(lastUpdated).toLocaleTimeString() : '—'}
+          Last Hardware Update: {hardwareStatus?.lastUpdated ? new Date(hardwareStatus.lastUpdated).toLocaleTimeString() : (lastUpdated ? new Date(lastUpdated).toLocaleTimeString() : '—')}
+        </div>
+      </div>
+
+      {/* Live Arduino UNO Hardware Telemetry & Raw Serial Monitor Box */}
+      <div className="card" style={{ marginBottom: '20px', padding: '16px' }}>
+        <div className="section-header" style={{ marginBottom: '12px' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+            <span style={{ display: 'inline-block', width: 8, height: 8, borderRadius: '50%', background: isArduinoConnected ? 'var(--status-normal)' : 'var(--status-high)' }} />
+            <span className="section-title">Arduino UNO Live Hardware Telemetry & Serial Monitor Stream (COM4)</span>
+          </div>
+          <span style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)' }}>
+            Real-Time USB Gateway Stream
+          </span>
+        </div>
+
+        {/* Real Live Hardware Values Summary Cards */}
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(130px, 1fr))', gap: '10px', marginBottom: '14px' }}>
+          <div style={{ background: 'var(--bg-secondary)', padding: '10px', borderRadius: '6px', border: '1px solid var(--border-subtle)' }}>
+            <div style={{ fontSize: '10px', color: 'var(--text-muted)', textTransform: 'uppercase' }}>Temperature</div>
+            <div style={{ fontSize: 'var(--text-md)', fontWeight: 700, color: 'var(--status-high)', fontFamily: 'var(--font-mono)' }}>
+              {hardwareStatus?.temperature != null ? `${hardwareStatus.temperature.toFixed(2)} °C` : '—'}
+            </div>
+          </div>
+          <div style={{ background: 'var(--bg-secondary)', padding: '10px', borderRadius: '6px', border: '1px solid var(--border-subtle)' }}>
+            <div style={{ fontSize: '10px', color: 'var(--text-muted)', textTransform: 'uppercase' }}>Vibration</div>
+            <div style={{ fontSize: 'var(--text-md)', fontWeight: 700, color: 'var(--accent)', fontFamily: 'var(--font-mono)' }}>
+              {hardwareStatus?.vibration != null ? `${hardwareStatus.vibration.toFixed(2)} m/s²` : '—'}
+            </div>
+          </div>
+          <div style={{ background: 'var(--bg-secondary)', padding: '10px', borderRadius: '6px', border: '1px solid var(--border-subtle)' }}>
+            <div style={{ fontSize: '10px', color: 'var(--text-muted)', textTransform: 'uppercase' }}>Hall Sensor</div>
+            <div style={{ fontSize: 'var(--text-xs)', fontWeight: 700, color: hardwareStatus?.hall_detected ? 'var(--status-normal)' : 'var(--text-secondary)' }}>
+              {hardwareStatus?.hall_detected ? 'MAGNET DETECTED' : 'NO MAGNET'}
+            </div>
+          </div>
+          <div style={{ background: 'var(--bg-secondary)', padding: '10px', borderRadius: '6px', border: '1px solid var(--border-subtle)' }}>
+            <div style={{ fontSize: '10px', color: 'var(--text-muted)', textTransform: 'uppercase' }}>Motor Speed</div>
+            <div style={{ fontSize: 'var(--text-md)', fontWeight: 700, color: 'var(--text-primary)', fontFamily: 'var(--font-mono)' }}>
+              {hardwareStatus?.motor_speed != null ? `${hardwareStatus.motor_speed}%` : '0%'}
+            </div>
+          </div>
+          <div style={{ background: 'var(--bg-secondary)', padding: '10px', borderRadius: '6px', border: '1px solid var(--border-subtle)' }}>
+            <div style={{ fontSize: '10px', color: 'var(--text-muted)', textTransform: 'uppercase' }}>Motor State</div>
+            <div style={{ fontSize: 'var(--text-xs)', fontWeight: 700, color: hardwareStatus?.motor_running ? 'var(--status-normal)' : 'var(--text-muted)' }}>
+              {hardwareStatus?.motor_running ? 'RUNNING' : 'STOPPED'}
+            </div>
+          </div>
+        </div>
+
+        {/* Dark Monospace Serial Monitor Terminal Output Box */}
+        <div
+          style={{
+            background: '#0a0d14',
+            border: '1px solid var(--border-subtle)',
+            borderRadius: '6px',
+            padding: '12px',
+            height: '140px',
+            overflowY: 'auto',
+            fontFamily: 'var(--font-mono)',
+            fontSize: '11px',
+            lineHeight: 1.6,
+            color: '#a9b1d6',
+          }}
+        >
+          {rawSerialLogs.length === 0 ? (
+            <div style={{ color: 'var(--text-muted)', fontStyle: 'italic' }}>
+              Waiting for incoming serial telemetry frames from COM4...
+            </div>
+          ) : (
+            rawSerialLogs.map((logLine, idx) => (
+              <div
+                key={idx}
+                style={{
+                  color: logLine.includes('MAGNET DETECTED')
+                    ? '#4ebd77'
+                    : logLine.includes('Temperature')
+                    ? '#61afef'
+                    : logLine.includes('Vibration')
+                    ? '#e06c75'
+                    : logLine.includes('Motor Speed')
+                    ? '#e5c07b'
+                    : '#98c379',
+                }}
+              >
+                {logLine}
+              </div>
+            ))
+          )}
         </div>
       </div>
 
@@ -256,26 +372,34 @@ export default function SensorData() {
                   </tr>
                 </thead>
                 <tbody>
-                  {filteredReadings.slice(0, 15).map(row => {
-                    const ts = getValueStatus(row.temperature, DEFAULT_THRESHOLDS.temperature);
-                    const vs = getValueStatus(row.vibration,   DEFAULT_THRESHOLDS.vibration);
-                    return (
-                      <tr key={row.id}>
-                        <td style={{ fontFamily: 'var(--font-mono)', fontSize: 'var(--text-xs)' }}>{row.time}</td>
-                        <td style={{ fontWeight: 600 }}>{row.jointId}</td>
-                        <td style={{ fontFamily: 'var(--font-mono)' }}>{row.temperature?.toFixed(1)}</td>
-                        <td><StatusBadge status={ts} size="sm" /></td>
-                        <td style={{ fontFamily: 'var(--font-mono)' }}>{row.vibration?.toFixed(2)}</td>
-                        <td><StatusBadge status={vs} size="sm" /></td>
-                        <td style={{ fontFamily: 'var(--font-mono)', color: row.hall_event === 'PULSE' ? 'var(--accent)' : 'var(--text-muted)' }}>
-                          {row.hall_event}
-                        </td>
-                        <td style={{ fontFamily: 'var(--font-mono)', color: 'var(--accent)' }}>
-                          {row.vision_score}/100
-                        </td>
-                      </tr>
-                    );
-                  })}
+                  {filteredReadings.length === 0 ? (
+                    <tr>
+                      <td colSpan={8} style={{ textAlign: 'center', padding: '24px', color: 'var(--text-muted)', fontSize: 'var(--text-xs)' }}>
+                        Waiting for hardware telemetry...
+                      </td>
+                    </tr>
+                  ) : (
+                    filteredReadings.slice(0, 15).map(row => {
+                      const ts = getValueStatus(row.temperature, DEFAULT_THRESHOLDS.temperature);
+                      const vs = getValueStatus(row.vibration,   DEFAULT_THRESHOLDS.vibration);
+                      return (
+                        <tr key={row.id}>
+                          <td style={{ fontFamily: 'var(--font-mono)', fontSize: 'var(--text-xs)' }}>{row.time}</td>
+                          <td style={{ fontWeight: 600 }}>{row.jointId}</td>
+                          <td style={{ fontFamily: 'var(--font-mono)' }}>{row.temperature?.toFixed(1)}</td>
+                          <td><StatusBadge status={ts} size="sm" /></td>
+                          <td style={{ fontFamily: 'var(--font-mono)' }}>{row.vibration?.toFixed(2)}</td>
+                          <td><StatusBadge status={vs} size="sm" /></td>
+                          <td style={{ fontFamily: 'var(--font-mono)', color: row.hall_event === 'PULSE' ? 'var(--accent)' : 'var(--text-muted)' }}>
+                            {row.hall_event}
+                          </td>
+                          <td style={{ fontFamily: 'var(--font-mono)', color: 'var(--accent)' }}>
+                            {row.vision_score}/100
+                          </td>
+                        </tr>
+                      );
+                    })
+                  )}
                 </tbody>
               </table>
             </div>

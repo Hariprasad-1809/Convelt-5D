@@ -32,3 +32,21 @@ def get_latest_sensors(joint_id: str, db: Session = Depends(get_db)):
         magnetic_value=latest.magnetic_value,
         vision_score=latest.vision_score
     )
+
+from backend.services.serial_service import serial_service
+
+@router.get("/hardware/status")
+def get_hardware_status():
+    """Fetch current Arduino UNO serial connection status and configuration."""
+    return {
+        "device_id": serial_service.device_id,
+        "port": serial_service.port,
+        "baud": serial_service.baud,
+        "connection_status": serial_service.connection_status,
+        "serial_status": serial_service.connection_status,
+        "websocket_status": "ONLINE",
+        "last_updated": serial_service.last_updated.isoformat() if serial_service.last_updated else None,
+        "serial_reader_running": serial_service._running,
+        "latest_telemetry": serial_service.latest_telemetry
+    }
+

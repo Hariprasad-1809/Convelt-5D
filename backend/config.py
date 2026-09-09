@@ -49,6 +49,17 @@ class Settings(BaseSettings):
                                         # UNKNOWN: Grey / offline state
     
     # --------------------------------------------------------------------------
+    # SERIAL & ARDUINO UNO HARDWARE CONFIGURATION
+    # --------------------------------------------------------------------------
+    SERIAL_PORT: str = os.getenv("SERIAL_PORT", "COM4")
+
+    SERIAL_BAUD: int = int(os.getenv("SERIAL_BAUD", "9600"))
+    DEVICE_ID: str = os.getenv("DEVICE_ID", "ARDUINO_UNO_01")
+    DEFAULT_JOINT_ID: str = os.getenv("DEFAULT_JOINT_ID", "J01")
+    SERIAL_AUTO_RECONNECT: bool = True
+    SERIAL_RECONNECT_INTERVAL_SECONDS: float = 3.0
+
+    # --------------------------------------------------------------------------
     # SYSTEM DISCLAIMERS & LABELS
     # --------------------------------------------------------------------------
     SCORING_TYPE: str = "RULE_BASED_WEIGHTED_FUSION"
@@ -60,3 +71,4 @@ class Settings(BaseSettings):
         extra = "ignore"
 
 settings = Settings()
+

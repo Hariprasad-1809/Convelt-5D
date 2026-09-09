@@ -17,30 +17,40 @@ BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if BASE_DIR not in sys.path:
     sys.path.insert(0, BASE_DIR)
 
+import asyncio
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from backend.config import settings
-from backend.database.db import engine, Base
+from backend.database.db import engine, Base, init_db
 from backend.services.simulation_service import simulation_engine
+from backend.services.serial_service import serial_service
+from backend.websocket import telemetry_ws
 from backend.api import joints, sensors, health, alerts, history, simulation
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Startup: Ensure DB tables are created & run initial simulation step
-    Base.metadata.create_all(bind=engine)
+    # Startup: Ensure DB tables & columns are initialized & run initial simulation step
+    init_db()
     simulation_engine.step()
     if settings.DEBUG:
         simulation_engine.start()
+
+
+    # Start Arduino UNO Serial Service on main event loop
+    loop = asyncio.get_running_loop()
+    serial_service.start(loop)
+
     yield
-    # Shutdown: Stop simulation thread
+    # Shutdown: Stop serial reader & simulation engine threads
+    serial_service.stop()
     simulation_engine.stop()
 
 app = FastAPI(
     title=settings.PROJECT_NAME,
     version=settings.VERSION,
-    description="JointGuard Conveyor-Belt Joint Health Monitoring Backend (Phase 1 REST API)",
+    description="JointGuard Conveyor-Belt Joint Health Monitoring Backend (Arduino UNO Serial + WebSockets)",
     lifespan=lifespan
 )
 
@@ -59,13 +69,15 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Register REST Routers
+# Register REST & WebSocket Routers
 app.include_router(joints.router)
 app.include_router(sensors.router)
 app.include_router(health.router)
 app.include_router(alerts.router)
 app.include_router(history.router)
 app.include_router(simulation.router)
+app.include_router(telemetry_ws.router)
+
 
 @app.get("/")
 def root_info():
