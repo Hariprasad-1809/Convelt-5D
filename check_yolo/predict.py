@@ -125,6 +125,28 @@ def extract_joint_roi(img: np.ndarray) -> np.ndarray:
     return img[y_min:y_max, x_min:x_max]
 
 
+def remap_display_confidence(
+    raw_conf_pct: float,
+    thresh_pct: float = 60.0,
+    max_display_pct: float = 88.0,
+) -> float:
+    """
+    Remaps raw confidence percentage (0.0 - 100.0) into a calibrated display range for visual preview.
+    High raw confidences (95% - 100%) display in the 80% - 90% range (capping at max_display_pct, default 88.0%).
+    Confidences at or below the decision threshold remain unscaled for smooth continuity.
+    """
+    if raw_conf_pct <= 0.0:
+        return 0.0
+    if raw_conf_pct <= thresh_pct:
+        return float(raw_conf_pct)
+    if thresh_pct >= 100.0:
+        return min(max_display_pct, float(raw_conf_pct))
+
+    ratio = (raw_conf_pct - thresh_pct) / (100.0 - thresh_pct)
+    remapped = thresh_pct + ratio * (max_display_pct - thresh_pct)
+    return min(max_display_pct, max(thresh_pct, float(remapped)))
+
+
 def resolve_model_path(requested_path: Optional[str] = None, version: str = "v4") -> str:
     """Finds the model weights file or falls back to latest results."""
     if requested_path:
@@ -238,7 +260,8 @@ def predict(
             (0, 0, 230) if display_prediction == "DAMAGE" else (0, 165, 255)
         )
 
-        header_text = f"{display_prediction} ({raw_conf * 100.0:.1f}%)"
+        disp_conf = remap_display_confidence(raw_conf * 100.0, thresh_pct=conf_thresh * 100.0)
+        header_text = f"{display_prediction} ({disp_conf:.1f}%)"
         cv2.rectangle(display_img, (0, 0), (w, 50), (20, 20, 20), -1)
         cv2.putText(
             display_img,

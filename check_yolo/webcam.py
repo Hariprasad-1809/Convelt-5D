@@ -396,6 +396,29 @@ def find_joint_in_roi(
     return (final_x, final_y, final_w, final_h)
 
 
+def remap_display_confidence(
+    raw_conf_pct: float,
+    thresh_pct: float = 60.0,
+    max_display_pct: float = 88.0,
+) -> float:
+    """
+    Remaps raw confidence percentage (0.0 - 100.0) into a calibrated display range for the HUD.
+    High raw confidences (95% - 100%) display in the 80% - 90% range (capping at max_display_pct, default 88.0%).
+    Confidences at or below the decision threshold remain unscaled for smooth continuity.
+    Used purely for on-screen HUD presentation; the internal decision logic remains untouched.
+    """
+    if raw_conf_pct <= 0.0:
+        return 0.0
+    if raw_conf_pct <= thresh_pct:
+        return float(raw_conf_pct)
+    if thresh_pct >= 100.0:
+        return min(max_display_pct, float(raw_conf_pct))
+
+    ratio = (raw_conf_pct - thresh_pct) / (100.0 - thresh_pct)
+    remapped = thresh_pct + ratio * (max_display_pct - thresh_pct)
+    return min(max_display_pct, max(thresh_pct, float(remapped)))
+
+
 def check_crop_quality(crop: np.ndarray) -> Tuple[bool, str]:
     """
     Validates crop quality before sending to YOLO.
@@ -694,7 +717,8 @@ def main():
                 # Detection badge
                 badge_text = f"JOINT: {last_display_pred}"
                 if last_display_conf > 0:
-                    badge_text += f" ({last_display_conf:.1f}%)"
+                    disp_conf = remap_display_confidence(last_display_conf, thresh_pct=args.conf_thresh * 100.0)
+                    badge_text += f" ({disp_conf:.1f}%)"
                 (tw, th), _ = cv2.getTextSize(badge_text, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
                 cv2.rectangle(display_frame, (bx, by - 22), (bx + tw + 10, by), (20, 20, 20), -1)
                 cv2.putText(
@@ -755,7 +779,8 @@ def main():
 
             # Confidence Text
             if last_display_conf > 0:
-                conf_text = f"Confidence: {last_display_conf:.1f}% (thresh: {args.conf_thresh*100:.0f}%)"
+                disp_conf = remap_display_confidence(last_display_conf, thresh_pct=args.conf_thresh * 100.0)
+                conf_text = f"Confidence: {disp_conf:.1f}% (thresh: {args.conf_thresh*100:.0f}%)"
             else:
                 conf_text = "Status: Monitoring belt for joint passage"
 
