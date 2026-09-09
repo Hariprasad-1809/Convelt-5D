@@ -250,13 +250,25 @@ def find_joint_in_roi(
     """
     Classical OpenCV Joint Detector inside the Fixed Search ROI.
 
-    Steps:
-      1. Converts ROI to HSV and Grayscale.
-      2. Dynamically thresholds bright/metallic joint elements above median belt intensity.
-      3. Performs morphological closing to merge discrete fastener teeth / specular reflections.
-      4. Identifies external contours matching conveyor joint physical characteristics.
-      5. Merges adjacent fragments and returns the tight bounding box (x, y, w, h) in ROI-relative space.
-      6. Returns None if only dark rubber belt is present without a joint.
+    Multi-Stage Physical Gate:
+      1. Specular metallic reflection check (V >= 180, S <= 75):
+         Real metallic fasteners/steel plates produce bright specular highlights
+         with neutral/low saturation. Plain rubber belt ridges and background
+         fabric/objects lack neutral specular metallic highlights.
+      2. Max brightness gate:
+         Metallic steel fasteners/plates reach V >= 195+ in specular reflections;
+         plain belt rubber peaks < 175.
+      3. HSV metallic dynamic thresholding (V >= 140, S <= 75).
+      4. High-confidence grayscale thresholding with strict minimum floor (160)
+         AND desaturation gating (S <= 75) so colorful background objects cannot pass.
+      5. Contour analysis with border machine rail suppression.
+      6. Color neutrality and saturation validation:
+         - Core bright pixels must be desaturated (bright_s_med <= 40, cand_s_med <= 45).
+         - Colorful/saturated pixel fraction must be low (sat_frac <= 0.25).
+         - Inter-channel balance (R ~= G ~= B, max channel difference <= 28) ensures
+           brushed metallic neutrality vs. colorful fabrics or dyed surfaces.
+      7. Merges adjacent fragments and returns the tight joint bounding box,
+         or returns None if only plain belt or gap background is present.
     """
     h, w = roi_img.shape[:2]
     if h < 20 or w < 20:
@@ -265,22 +277,39 @@ def find_joint_in_roi(
     gray = cv2.cvtColor(roi_img, cv2.COLOR_BGR2GRAY)
     hsv = cv2.cvtColor(roi_img, cv2.COLOR_BGR2HSV)
     v_chan = hsv[:, :, 2]
+    s_chan = hsv[:, :, 1]
 
-    # Metallic joints on rubber belt have distinctly higher V intensity
-    v_med = float(np.median(v_chan))
-    v_lower = max(90, min(210, int(v_med + 20)))
-
-    # Quick pre-filter: if < 1.0% of pixels exceed metallic threshold, no joint is present
-    bright_count = np.count_nonzero(v_chan > v_lower)
-    if (bright_count / float(h * w)) < 0.010:
+    # Pre-filter 1: Specular metallic reflection check
+    # Real metallic fasteners/plates reflect bright specular highlights with neutral/low saturation
+    # (V >= 180, S <= 75). Plain rubber belt ridges and colored fabrics lack neutral metallic highlights.
+    metallic_highlights = (v_chan >= 180) & (s_chan <= 75)
+    metallic_count = int(np.count_nonzero(metallic_highlights))
+    if metallic_count < 250:
         return None
 
-    # Binary mask: HSV V-channel threshold + Grayscale dynamic threshold
+    # Pre-filter 2: Maximum brightness gate
+    # Real metallic fasteners hit V >= 210 in specular reflection; plain belt rubber peaks < 175
+    if int(v_chan.max()) < 195:
+        return None
+
+    v_med = float(np.median(v_chan))
+    # Metallic dynamic threshold: metallic patch is significantly brighter than rubber belt
+    # Minimum floor of 140 prevents capturing dark rubber ridges
+    v_lower = max(140, min(210, int(v_med + 20)))
+    s_upper = 75
+
+    # Binary mask: HSV metallic range (high V, low/moderate S for silver/metallic reflections)
     mask_hsv = cv2.inRange(
-        hsv, np.array([0, 0, v_lower], dtype=np.uint8), np.array([180, 150, 255], dtype=np.uint8)
+        hsv, np.array([0, 0, v_lower], dtype=np.uint8), np.array([180, s_upper, 255], dtype=np.uint8)
     )
+
+    # Grayscale threshold with strict minimum floor (160) AND desaturation constraint (S <= 75)
+    # This ensures that bright, colorful background objects (fabric/paper) cannot pass via grayscale
     gray_med = float(np.median(gray))
-    _, mask_gray = cv2.threshold(gray, max(90, int(gray_med + 25)), 255, cv2.THRESH_BINARY)
+    gray_thresh = max(160, int(gray_med + 25))
+    _, mask_gray_raw = cv2.threshold(gray, min(235, gray_thresh), 255, cv2.THRESH_BINARY)
+    mask_gray = cv2.bitwise_and(mask_gray_raw, (s_chan <= s_upper).astype(np.uint8) * 255)
+    # Combine HSV metallic mask and desaturated high-brightness grayscale
     mask = cv2.bitwise_or(mask_hsv, mask_gray)
 
     # Morphological closing to bridge fastener teeth / reflection fragments into one joint contour
@@ -296,6 +325,46 @@ def find_joint_in_roi(
         bx, by, bw, bh = cv2.boundingRect(c)
         if bw < min_width or bh < 10:
             continue
+
+        # Suppress vertical machine side-rails / table strips clinging to ROI extreme left/right edges
+        is_side_rail = (
+            (bx <= 3 or bx + bw >= w - 3) and
+            (bh > 2.5 * bw and bh >= int(0.7 * h))
+        )
+        if is_side_rail:
+            continue
+
+        # Candidate region must contain genuine metallic specular evidence (V >= 175, S <= 75)
+        cand_v = v_chan[by:by+bh, bx:bx+bw]
+        cand_s = s_chan[by:by+bh, bx:bx+bw]
+        cand_metallic = np.count_nonzero((cand_v >= 175) & (cand_s <= 75))
+        if cand_metallic < 150:
+            continue
+
+        # COLOR / SATURATION CHECK: Real metallic joint is neutral/desaturated (brushed steel/foil)
+        # Background objects visible through belt gaps (fabric, colored floors, clothes) are colorful
+        bright_mask = cand_v >= 150
+        bright_s_med = float(np.median(cand_s[bright_mask])) if np.any(bright_mask) else float(np.median(cand_s))
+        cand_s_med = float(np.median(cand_s))
+        if bright_s_med > 40.0 or cand_s_med > 45.0:
+            continue
+
+        # Fraction of colorful/saturated pixels: real joints have <= 11% pixels with S > 70
+        sat_frac = float(np.count_nonzero(cand_s > 70)) / float(cand_s.size)
+        if sat_frac > 0.25:
+            continue
+
+        # Color channel balance (neutral metal has R ~= G ~= B, channel diff <= 15 on bright pixels)
+        cand_bgr = roi_img[by:by+bh, bx:bx+bw]
+        b, g, r = cv2.split(cand_bgr)
+        diff_rg = np.abs(r.astype(int) - g.astype(int))
+        diff_gb = np.abs(g.astype(int) - b.astype(int))
+        diff_rb = np.abs(r.astype(int) - b.astype(int))
+        max_ch_diff = np.maximum(diff_rg, np.maximum(diff_gb, diff_rb))
+        ch_diff_med = float(np.median(max_ch_diff[bright_mask])) if np.any(bright_mask) else float(np.median(max_ch_diff))
+        if ch_diff_med > 28.0:
+            continue
+
         candidates.append((area, (bx, by, bw, bh)))
 
     if not candidates:
