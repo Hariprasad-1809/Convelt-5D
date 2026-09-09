@@ -9,6 +9,14 @@ DISCLAIMER:
 - Vision score is SIMULATED or MANUALLY INJECTED in Phase 1.
 """
 
+import os
+import sys
+
+# Ensure parent directory (jointgurd_proto) is on sys.path so 'backend' package imports always succeed
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if BASE_DIR not in sys.path:
+    sys.path.insert(0, BASE_DIR)
+
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware

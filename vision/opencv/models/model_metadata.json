@@ -1,0 +1,40 @@
+{
+  "model_architecture": "MobileNetV2 (Pretrained ImageNet + Fine-tuned Binary Head)",
+  "framework": "PyTorch 2.14.0+cpu",
+  "input_size": [
+    224,
+    224
+  ],
+  "class_mapping": {
+    "0": "HEALTHY",
+    "1": "DAMAGE"
+  },
+  "classes": [
+    "HEALTHY",
+    "DAMAGE"
+  ],
+  "num_base_images": {
+    "healthy": 1,
+    "damage": 1
+  },
+  "total_training_instances": 202,
+  "metrics": {
+    "train_accuracy": 1.0,
+    "base_sample_accuracy": 1.0,
+    "precision": 1.0,
+    "recall": 1.0,
+    "f1_score": 1.0,
+    "confusion_matrix": [
+      [
+        1,
+        0
+      ],
+      [
+        0,
+        1
+      ]
+    ]
+  },
+  "trained_at": "2026-09-08T16:29:12Z",
+  "warning": "WARNING: Training dataset currently contains 2 original images (1 healthy, 1 damage). Small datasets may not generalize well to new camera angles, lighting, or distances not represented in the training images."
+}

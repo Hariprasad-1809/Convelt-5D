@@ -55,6 +55,7 @@ class TrackItem:
         self.classification_result: Optional[ClassificationResult] = None
         self.has_been_classified: bool = False
         self.has_been_inspected: bool = False
+        self.has_exited_roi: bool = False
 
     @property
     def current_centroid(self) -> Tuple[int, int]:
@@ -68,6 +69,7 @@ class JointTracker:
         self.cfg: VisionConfig = config if config is not None else DEFAULT_CONFIG
         self.next_track_id: int = 1
         self.tracks: Dict[int, TrackItem] = {}
+        self.recently_removed_tracks: Dict[int, Dict[str, Any]] = {}
 
     def _is_touching_frame_edge(self, bbox: BoundingBox, frame_w: int, frame_h: int) -> bool:
         """Checks if bounding box touches or is near frame border (partially occluded)."""
@@ -107,21 +109,71 @@ class JointTracker:
         not_edge = not self._is_touching_frame_edge(bbox, frame_w, frame_h)
         return contained and not_edge
 
-    def _compute_averaged_classification(self, track: TrackItem) -> ClassificationResult:
-        """Averages raw features collected over the capture zone window and computes final classification."""
+    def _is_in_or_near_capture_zone(self, bbox: Optional[BoundingBox], frame_w: int, frame_h: int) -> bool:
+        """Checks if bbox is physically inside or near the capture zone."""
+        if bbox is None:
+            return False
+        cx, cy = bbox.center
+        cz_x1 = int(self.cfg.CAPTURE_ZONE_X_MIN * frame_w)
+        cz_y1 = int(self.cfg.CAPTURE_ZONE_Y_MIN * frame_h)
+        cz_x2 = int(self.cfg.CAPTURE_ZONE_X_MAX * frame_w)
+        cz_y2 = int(self.cfg.CAPTURE_ZONE_Y_MAX * frame_h)
+        margin = int(self.cfg.MAX_CENTROID_DISTANCE)
+        return (cz_x1 - margin <= cx <= cz_x2 + margin) and (cz_y1 - margin <= cy <= cz_y2 + margin)
+
+    def _compute_averaged_classification(self, track: TrackItem, current_frame: Optional[np.ndarray] = None) -> ClassificationResult:
+        """Averages probabilities and features collected over the capture zone window and computes final classification."""
         if not track.feature_history:
-            print("[WARNING] Capture zone feature window empty — returning INVALID classification")
+            # Fallback to direct classification of the current bounding box crop instead of failing to INVALID
+            if current_frame is not None and track.bbox is not None:
+                roi_crop = track.bbox.crop_roi(current_frame)
+                if roi_crop.size > 0 and roi_crop.shape[0] >= 5 and roi_crop.shape[1] >= 5:
+                    return classify_joint(roi_crop, self.cfg)
+
             return ClassificationResult(
-                label="INVALID",
-                vision_score=0.0,
-                features={"edge_density": 0.0, "hough_line_score": 0.0, "intensity_variance": 0.0}
+                label="UNCERTAIN",
+                vision_score=50.0,
+                features={"edge_density": 0.0, "intensity_variance": 0.0, "confidence": 0.50, "display_label": "UNCERTAIN"}
             )
 
+        # Check if trained probabilities exist in feature history
+        has_trained_probs = any("p_healthy" in f for f in track.feature_history)
+        if has_trained_probs:
+            avg_p_healthy = float(np.mean([f.get("p_healthy", 0.5) for f in track.feature_history]))
+            avg_p_damage = float(np.mean([f.get("p_damage", 0.5) for f in track.feature_history]))
+            conf_threshold = getattr(self.cfg, "CONFIDENCE_THRESHOLD", 0.60)
+
+            if avg_p_healthy >= conf_threshold:
+                label = "HEALTHY"
+                confidence = avg_p_healthy
+                vision_score = round(confidence * 100.0, 2)
+            elif avg_p_damage >= conf_threshold:
+                label = "DAMAGE"
+                confidence = avg_p_damage
+                vision_score = round((1.0 - confidence) * 100.0, 2)
+            else:
+                label = "UNCERTAIN"
+                confidence = max(avg_p_healthy, avg_p_damage)
+                vision_score = 50.0
+
+            avg_features = {
+                "confidence": round(confidence, 4),
+                "p_healthy": round(avg_p_healthy, 4),
+                "p_damage": round(avg_p_damage, 4),
+                "edge_density": round(float(np.mean([f.get("edge_density", 0.0) for f in track.feature_history])), 4),
+                "intensity_variance": round(float(np.mean([f.get("intensity_variance", 0.0) for f in track.feature_history])), 2)
+            }
+            return ClassificationResult(
+                label=label,
+                vision_score=vision_score,
+                features=avg_features
+            )
+
+        # Fallback to classical CV feature weighting
         avg_edge = float(np.mean([f.get("edge_density", 0.0) for f in track.feature_history]))
         avg_hough = float(np.mean([f.get("hough_line_score", 0.0) for f in track.feature_history]))
         avg_var = float(np.mean([f.get("intensity_variance", 0.0) for f in track.feature_history]))
 
-        # Normalize metrics against config maximums
         norm_edge_penalty = min(1.0, avg_edge / self.cfg.EDGE_DENSITY_MAX_EXPECTED)
         norm_hough_penalty = min(1.0, avg_hough / 2.0)
         norm_var_penalty = min(1.0, avg_var / self.cfg.VARIANCE_MAX_EXPECTED)
@@ -180,6 +232,12 @@ class JointTracker:
         """
         frame_h, frame_w = (frame.shape[:2]) if frame is not None else (480, 640)
 
+        # Age recently-removed tracks and purge those beyond grace window (10 frames)
+        for tid in list(self.recently_removed_tracks.keys()):
+            self.recently_removed_tracks[tid]["age"] += 1
+            if self.recently_removed_tracks[tid]["age"] > 10:
+                del self.recently_removed_tracks[tid]
+
         # ---------------------------------------------------------------------
         # Case A: No joint detected in this frame
         # ---------------------------------------------------------------------
@@ -187,7 +245,10 @@ class JointTracker:
             retired_event = None
             for track_id, track in list(self.tracks.items()):
                 track.disappeared_count += 1
-                if track.disappeared_count > self.cfg.MAX_DISAPPEARED_FRAMES:
+                # If a track was merely approaching and lost detection, reset it quickly (3 frames)
+                # to avoid lingering ghost boxes on screen
+                max_allowed = 3 if track.state == "APPROACHING" else self.cfg.MAX_DISAPPEARED_FRAMES
+                if track.disappeared_count > max_allowed:
                     if track.has_been_inspected or track.has_been_classified:
                         track.state = "PASSED"
                         retired_event = TrackEvent(
@@ -197,6 +258,23 @@ class JointTracker:
                             classification=track.classification_result,
                             is_new_classification=False
                         )
+
+                    # Prevent duplicate IDs caused by transient detection dropouts:
+                    # If the track was physically inside or near the capture zone / ROI and did not
+                    # genuinely exit the far side of the ROI, save only the single most recent track
+                    is_in_or_near = (
+                        track.bbox is not None and
+                        (self._is_inside_roi(track.bbox, frame_w, frame_h) or
+                         self._is_in_or_near_capture_zone(track.bbox, frame_w, frame_h))
+                    )
+                    if is_in_or_near and not track.has_exited_roi:
+                        self.recently_removed_tracks = {
+                            track_id: {
+                                "track": track,
+                                "age": 0
+                            }
+                        }
+
                     del self.tracks[track_id]
             return retired_event
 
@@ -214,13 +292,43 @@ class JointTracker:
                 min_dist = dist
                 best_match_id = track_id
 
-        # Update existing track or initialize new track
+        # Update existing active track, re-attach recently removed track, or initialize new track
+        reattached = False
         if best_match_id is not None:
             track = self.tracks[best_match_id]
         else:
-            track = TrackItem(self.next_track_id, bbox)
-            self.tracks[self.next_track_id] = track
-            self.next_track_id += 1
+            # Check recently-removed tracks (within grace window of 5-10 frames)
+            # for a centroid within MAX_CENTROID_DISTANCE of the new detection
+            reattached_id = None
+            reattached_min_dist = float("inf")
+            for tid, record in list(self.recently_removed_tracks.items()):
+                rem_track = record["track"]
+                prev_cx, prev_cy = rem_track.current_centroid
+                dist = np.hypot(cx - prev_cx, cy - prev_cy)
+                if dist < reattached_min_dist and dist <= self.cfg.MAX_CENTROID_DISTANCE:
+                    reattached_min_dist = dist
+                    reattached_id = tid
+
+            if reattached_id is not None:
+                track = self.recently_removed_tracks.pop(reattached_id)["track"]
+                self.tracks[reattached_id] = track
+                reattached = True
+                if track.has_been_inspected:
+                    track.state = "INSPECTING"
+            else:
+                # If an active track is already in INSPECTING state inside the capture zone,
+                # and this detection is inside the capture zone, match it to that active track
+                # rather than spawning a duplicate track ID on the same physical joint
+                active_inspecting = [
+                    (tid, t) for tid, t in self.tracks.items()
+                    if t.state == "INSPECTING" and self._is_contained_in_capture_zone(bbox, frame_w, frame_h)
+                ]
+                if active_inspecting:
+                    best_id, track = active_inspecting[0]
+                else:
+                    track = TrackItem(self.next_track_id, bbox)
+                    self.tracks[self.next_track_id] = track
+                    self.next_track_id += 1
 
         track.bbox = bbox
         track.disappeared_count = 0
@@ -228,8 +336,19 @@ class JointTracker:
         delta_dist = float(np.hypot(cx - prev_cx, cy - prev_cy))
         track.centroid_history.append((cx, cy))
 
-        # Velocity smooth motion validation
-        if len(track.velocity_history) > 0:
+        # Crucial: Any OTHER track in self.tracks was NOT detected on this frame!
+        # Increment their disappeared_count and remove stale tracks so IDs do not accumulate
+        for other_id, other_track in list(self.tracks.items()):
+            if other_id != track.track_id:
+                other_track.disappeared_count += 1
+                max_allowed = 3 if other_track.state == "APPROACHING" else self.cfg.MAX_DISAPPEARED_FRAMES
+                if other_track.disappeared_count > max_allowed:
+                    if other_track.has_been_inspected or other_track.has_been_classified:
+                        other_track.state = "PASSED"
+                    del self.tracks[other_id]
+
+        # Velocity smooth motion validation (skip erratic jump check if reattached after transient gap)
+        if not reattached and len(track.velocity_history) > 0:
             v_prev = track.velocity_history[-1]
             if abs(delta_dist - v_prev) > self.cfg.MAX_VELOCITY_VARIANCE:
                 # Erratic jump detected, reset capture window
@@ -244,6 +363,7 @@ class JointTracker:
         if not inside_roi:
             if track.has_been_inspected:
                 track.state = "PASSED"
+                track.has_exited_roi = True
                 if not track.has_been_classified:
                     track.classification_result = self._compute_averaged_classification(track)
                     track.has_been_classified = True
@@ -257,25 +377,22 @@ class JointTracker:
             if inside_cz:
                 track.capture_zone_frames += 1
 
-                # Sample feature snapshot if sharp enough
-                if frame is not None and not track.has_been_classified:
+                # Sample feature snapshot
+                if frame is not None:
                     roi_crop = bbox.crop_roi(frame)
-                    gray_crop = cv2.cvtColor(roi_crop, cv2.COLOR_BGR2GRAY) if len(roi_crop.shape) == 3 else roi_crop
-                    sharpness = float(cv2.Laplacian(gray_crop, cv2.CV_64F).var())
-
-                    if sharpness >= self.cfg.MIN_SHARPNESS_SCORE:
+                    if roi_crop.size > 0 and roi_crop.shape[0] >= 5 and roi_crop.shape[1] >= 5:
                         snapshot = classify_joint(roi_crop, self.cfg)
                         track.feature_history.append(snapshot.features)
+                        # Keep a real-time live classification on the track object immediately
+                        track.classification_result = snapshot
                         if len(track.feature_history) > self.cfg.CAPTURE_ZONE_MAX_FRAMES:
                             track.feature_history.pop(0)
-                    else:
-                        print(f"[DEBUG] Frame skipped due to motion blur (sharpness {sharpness:.1f} < {self.cfg.MIN_SHARPNESS_SCORE:.1f})")
 
-                if track.capture_zone_frames >= self.cfg.CAPTURE_ZONE_MIN_FRAMES:
+                if track.has_been_inspected or track.capture_zone_frames >= self.cfg.CAPTURE_ZONE_MIN_FRAMES:
                     track.state = "INSPECTING"
                     track.has_been_inspected = True
                     if not track.has_been_classified:
-                        track.classification_result = self._compute_averaged_classification(track)
+                        track.classification_result = self._compute_averaged_classification(track, frame)
                         track.has_been_classified = True
                         is_new_class = True
             else:
@@ -283,7 +400,7 @@ class JointTracker:
                 if track.has_been_inspected:
                     track.state = "INSPECTING"
                     if not track.has_been_classified:
-                        track.classification_result = self._compute_averaged_classification(track)
+                        track.classification_result = self._compute_averaged_classification(track, frame)
                         track.has_been_classified = True
                         is_new_class = True
                 else:

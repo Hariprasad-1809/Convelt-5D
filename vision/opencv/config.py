@@ -17,10 +17,14 @@ class VisionConfig:
     # -------------------------------------------------------------------------
     # 1. DETECTOR TUNABLE THRESHOLDS (Metal Patch on Black Belt)
     # -------------------------------------------------------------------------
+    # Strict CAPTURE ZONE constraint for detection (prevents detecting exterior white table/background)
+    DETECT_STRICT_CAPTURE_ZONE: bool = True
+
     # HSV Threshold range for metallic foil patch (high brightness V, low saturation S)
     # Belt rubber is dark/black (low V); foil reflects light (high V, metallic low/moderate S)
-    HSV_LOWER: np.ndarray = field(default_factory=lambda: np.array([0, 0, 160], dtype=np.uint8))
+    HSV_LOWER: np.ndarray = field(default_factory=lambda: np.array([0, 0, 140], dtype=np.uint8))
     HSV_UPPER: np.ndarray = field(default_factory=lambda: np.array([180, 65, 255], dtype=np.uint8))
+    HSV_DYNAMIC_DELTA: float = 15.0      # Dynamic offset above median V channel in ROI
 
     # Grayscale fallback threshold disabled by default to prevent ambient light blowout
     USE_GRAY_FALLBACK: bool = False
@@ -34,17 +38,18 @@ class VisionConfig:
     LIVE_DENOISE_KERNEL: Tuple[int, int] = (3, 3)
 
     # Bounding Box Contour Filters & Clustering (Joint foil is a wide rectangular patch)
-    MIN_CONTOUR_AREA: int = 2500         # Min pixel area of joint foil candidate (filters out tiny noise boxes)
+    # Calibrated for live webcam scale (~1500 - 4000 px at normal webcam distance) as well as close-ups
+    MIN_CONTOUR_AREA: int = 800          # Min pixel area of joint foil candidate (allows ~2070 px webcam joint with safety margin)
     MAX_CONTOUR_AREA: int = 2000000      # Max pixel area fallback (overridden by ROI area fraction if ROI active)
-    MAX_CONTOUR_AREA_FRACTION_OF_ROI: float = 1.0  # Max candidate area relative to ROI area
+    MAX_CONTOUR_AREA_FRACTION_OF_ROI: float = 1.0   # Max candidate area relative to ROI area (allows large joint plates filling capture zone)
     MIN_ASPECT_RATIO: float = 1.0        # Aspect ratio = width / height (or height/width, min 1.0 for square patches)
     MAX_ASPECT_RATIO: float = 20.0       # Upper bound for rectangular joint patch shape (allows wide/long metallic foil joints)
-    CONTOUR_CLUSTER_MAX_GAP_PX: int = 60 # Max pixel gap between nearby patch fragments to cluster them into one candidate box
-    CONTOUR_MERGE_GAP_PIXELS: int = 60   # Alias for backward compatibility
+    CONTOUR_CLUSTER_MAX_GAP_PX: int = 80 # Max pixel gap between nearby patch fragments to cluster them into one candidate box
+    CONTOUR_MERGE_GAP_PIXELS: int = 80   # Alias for backward compatibility
 
     # Relative Context Contrast Validation (Lighting-Invariant)
     # Checks candidate mean brightness minus surrounding belt margin mean brightness. Must be >= MIN_CONTEXT_CONTRAST
-    MIN_CONTEXT_CONTRAST: float = 10.0  # Must be live-calibrated via calibrate.py (min brightness delta above belt)
+    MIN_CONTEXT_CONTRAST: float = 2.0    # Min brightness delta above belt margin (calibrated for live diffuse webcam lighting)
     BELT_CONTEXT_MIN_MARGIN_PIXELS: int = 10   # Minimum pixel thickness for top/bottom margin strips
 
     # Glare / Overexposure Protection (Rejects featureless blown-out glare hotspots e.g. on motor/clamp)
@@ -59,22 +64,23 @@ class VisionConfig:
     # 2. INSPECTION REGION OF INTEREST (ROI) & CAPTURE ZONE (Continuous Motion)
     # -------------------------------------------------------------------------
     # Normalized outer inspection ROI boundaries [x_min, y_min, x_max, y_max] (0.0 - 1.0)
-    # Scaled to focus on the conveyor belt (x: 0.10 to 0.90) and exclude external background
-    ROI_X_MIN: float = 0.10
+    ROI_X_MIN: float = 0.15
     ROI_Y_MIN: float = 0.05
-    ROI_X_MAX: float = 0.90
-    ROI_Y_MAX: float = 0.95
+    ROI_X_MAX: float = 0.88
+    ROI_Y_MAX: float = 0.85
 
-    # Inner Capture Zone (centered inside outer ROI for continuous belt motion)
-    CAPTURE_ZONE_X_MIN: float = 0.20
-    CAPTURE_ZONE_Y_MIN: float = 0.15
-    CAPTURE_ZONE_X_MAX: float = 0.80
-    CAPTURE_ZONE_Y_MAX: float = 0.85
+    # Inner Capture Zone: Strictly encloses the active conveyor belt joint corridor,
+    # starts right after left machine rail (x >= 0.17) and cuts off before bottom white background (y <= 0.80)
+    CAPTURE_ZONE_X_MIN: float = 0.17
+    CAPTURE_ZONE_Y_MIN: float = 0.08
+    CAPTURE_ZONE_X_MAX: float = 0.86
+    CAPTURE_ZONE_Y_MAX: float = 0.80
     CAPTURE_ZONE_MIN_FRAMES: int = 2      # Min consecutive frames inside capture zone to trigger INSPECTING
     CAPTURE_ZONE_MAX_FRAMES: int = 10     # Max frames window to aggregate feature snapshots
 
     # Motion Blur Awareness & Velocity Validation
-    MIN_SHARPNESS_SCORE: float = 30.0     # Min variance of Laplacian score for motion blur rejection
+    # Neural network inference handles diffuse/motion-blurred textures natively
+    MIN_SHARPNESS_SCORE: float = 0.0      # Set to 0.0 to never drop valid joint frames
     MAX_VELOCITY_VARIANCE: float = 25.0   # Max allowed centroid speed delta between frames
 
     # Tracker Centroid Distance Matching
@@ -85,8 +91,14 @@ class VisionConfig:
     TARGET_CAMERA_FPS: int = 30
 
     # -------------------------------------------------------------------------
-    # 3. FEATURE EXTRACTION & DAMAGE CLASSIFICATION (Must be live-calibrated)
+    # 3. TRAINABLE CLASSIFIER & FEATURE EXTRACTION SETTINGS
     # -------------------------------------------------------------------------
+    # Trained model serialization paths (relative to vision/opencv/ or absolute)
+    MODEL_PATH: str = "models/joint_classifier.pth"
+    METADATA_PATH: str = "models/model_metadata.json"
+    CLASSIFIER_INPUT_SIZE: Tuple[int, int] = (224, 224)
+    CONFIDENCE_THRESHOLD: float = 0.60    # Min confidence required for decisive HEALTHY/DAMAGE decision
+
     # Feature 1: Canny Edge Detection (Edge Density)
     CANNY_THRESHOLD1: float = 50.0
     CANNY_THRESHOLD2: float = 150.0
