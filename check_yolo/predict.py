@@ -20,8 +20,11 @@ import numpy as np
 
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-DEFAULT_MODEL_PATH = os.path.join(SCRIPT_DIR, "models", "joint_yolo_classifier.pt")
-FALLBACK_MODEL_PATH = os.path.join(SCRIPT_DIR, "results", "joint_cls", "weights", "best.pt")
+DEFAULT_MODEL_V4_PATH = os.path.join(SCRIPT_DIR, "models", "joint_yolo_classifier_v4.pt")
+DEFAULT_MODEL_V2_PATH = os.path.join(SCRIPT_DIR, "models", "joint_yolo_classifier_v2.pt")
+DEFAULT_MODEL_V1_PATH = os.path.join(SCRIPT_DIR, "models", "joint_yolo_classifier.pt")
+DEFAULT_MODEL_PATH = DEFAULT_MODEL_V4_PATH if os.path.isfile(DEFAULT_MODEL_V4_PATH) else (DEFAULT_MODEL_V2_PATH if os.path.isfile(DEFAULT_MODEL_V2_PATH) else DEFAULT_MODEL_V1_PATH)
+FALLBACK_MODEL_PATH = os.path.join(SCRIPT_DIR, "results", "joint_cls_v4", "weights", "best.pt")
 
 # Confidence threshold below which a prediction is flagged UNCERTAIN (Step 9)
 DEFAULT_CONFIDENCE_THRESHOLD = 0.60
@@ -39,8 +42,30 @@ def parse_args():
     parser.add_argument(
         "--model",
         type=str,
-        default=DEFAULT_MODEL_PATH,
-        help=f"Path to trained YOLO classification model weights (default: {DEFAULT_MODEL_PATH})",
+        default=None,
+        help=f"Explicit path to trained YOLO classification model weights (overrides version flags)",
+    )
+    parser.add_argument(
+        "--model-version",
+        type=str,
+        choices=["v1", "v2", "v4"],
+        default="v4",
+        help="Model version to use: 'v4' (default), 'v2', or 'v1'",
+    )
+    parser.add_argument(
+        "--v1",
+        action="store_true",
+        help="Shortcut to use v1 model",
+    )
+    parser.add_argument(
+        "--v2",
+        action="store_true",
+        help="Shortcut to use v2 model",
+    )
+    parser.add_argument(
+        "--v4",
+        action="store_true",
+        help="Shortcut to use v4 model (default)",
     )
     parser.add_argument(
         "--conf-thresh",
@@ -100,29 +125,55 @@ def extract_joint_roi(img: np.ndarray) -> np.ndarray:
     return img[y_min:y_max, x_min:x_max]
 
 
-def resolve_model_path(requested_path: str) -> str:
+def resolve_model_path(requested_path: Optional[str] = None, version: str = "v4") -> str:
     """Finds the model weights file or falls back to latest results."""
-    if os.path.isfile(requested_path):
-        return requested_path
-    if os.path.isfile(FALLBACK_MODEL_PATH):
-        return FALLBACK_MODEL_PATH
+    if requested_path:
+        if os.path.isfile(requested_path):
+            return os.path.abspath(requested_path)
+        raise FileNotFoundError(f"Model weights not found at '{requested_path}'.")
+
+    if version == "v4":
+        if os.path.isfile(DEFAULT_MODEL_V4_PATH):
+            return os.path.abspath(DEFAULT_MODEL_V4_PATH)
+        if os.path.isfile(FALLBACK_MODEL_PATH):
+            return os.path.abspath(FALLBACK_MODEL_PATH)
+        if os.path.isfile(DEFAULT_MODEL_V2_PATH):
+            return os.path.abspath(DEFAULT_MODEL_V2_PATH)
+        if os.path.isfile(DEFAULT_MODEL_V1_PATH):
+            return os.path.abspath(DEFAULT_MODEL_V1_PATH)
+
+    if version == "v2":
+        if os.path.isfile(DEFAULT_MODEL_V2_PATH):
+            return os.path.abspath(DEFAULT_MODEL_V2_PATH)
+        fallback_v2 = os.path.join(SCRIPT_DIR, "results", "joint_cls_v2", "weights", "best.pt")
+        if os.path.isfile(fallback_v2):
+            return os.path.abspath(fallback_v2)
+        if os.path.isfile(DEFAULT_MODEL_V1_PATH):
+            return os.path.abspath(DEFAULT_MODEL_V1_PATH)
+
+    if version == "v1":
+        if os.path.isfile(DEFAULT_MODEL_V1_PATH):
+            return os.path.abspath(DEFAULT_MODEL_V1_PATH)
+        fallback_v1 = os.path.join(SCRIPT_DIR, "results", "joint_cls", "weights", "best.pt")
+        if os.path.isfile(fallback_v1):
+            return os.path.abspath(fallback_v1)
+
     # Look for any best.pt under results
     results_dir = os.path.join(SCRIPT_DIR, "results")
     if os.path.isdir(results_dir):
         for root, _, files in os.walk(results_dir):
             if "best.pt" in files:
-                return os.path.join(root, "best.pt")
-    raise FileNotFoundError(
-        f"Model weights not found at '{requested_path}'. Please run train.py first."
-    )
+                return os.path.abspath(os.path.join(root, "best.pt"))
+    raise FileNotFoundError("Model weights not found. Please run train.py first.")
 
 
 def predict(
     image_path: str,
-    model_path: str = DEFAULT_MODEL_PATH,
+    model_path: Optional[str] = None,
     conf_thresh: float = DEFAULT_CONFIDENCE_THRESHOLD,
     apply_crop: bool = True,
     show: bool = False,
+    version: str = "v4",
 ) -> Dict[str, Any]:
     """
     Performs inference on an image and returns a dictionary with predictions.
@@ -130,7 +181,7 @@ def predict(
     if not os.path.isfile(image_path):
         raise FileNotFoundError(f"Image not found: {image_path}")
 
-    model_file = resolve_model_path(model_path)
+    model_file = resolve_model_path(model_path, version=version)
 
     # Lazy import to avoid startup delay
     from ultralytics import YOLO
@@ -223,6 +274,7 @@ def predict(
 def main():
     args = parse_args()
 
+    req_version = "v1" if args.v1 else ("v2" if args.v2 else ("v4" if args.v4 else args.model_version))
     try:
         res = predict(
             image_path=args.image_path,
@@ -230,6 +282,7 @@ def main():
             conf_thresh=args.conf_thresh,
             apply_crop=not args.no_crop,
             show=args.show,
+            version=req_version,
         )
 
         # Output format matching Step 6

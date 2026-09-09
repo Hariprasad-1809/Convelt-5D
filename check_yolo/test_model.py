@@ -50,8 +50,30 @@ def parse_args():
     parser.add_argument(
         "--model",
         type=str,
-        default=DEFAULT_MODEL_PATH,
-        help="Path to trained YOLO classification model weights",
+        default=None,
+        help="Explicit path to trained YOLO classification model weights (overrides version flags)",
+    )
+    parser.add_argument(
+        "--model-version",
+        type=str,
+        choices=["v1", "v2", "v4"],
+        default="v4",
+        help="Model version to test: 'v4' (default), 'v2', or 'v1'",
+    )
+    parser.add_argument(
+        "--v1",
+        action="store_true",
+        help="Shortcut to test v1 model",
+    )
+    parser.add_argument(
+        "--v2",
+        action="store_true",
+        help="Shortcut to test v2 model",
+    )
+    parser.add_argument(
+        "--v4",
+        action="store_true",
+        help="Shortcut to test v4 model (default)",
     )
     parser.add_argument(
         "--healthy-image",
@@ -82,8 +104,9 @@ def main():
         print(f"[ERROR] Damaged reference image not found: {d_image}", file=sys.stderr)
         sys.exit(1)
 
+    req_version = "v1" if args.v1 else ("v2" if args.v2 else ("v4" if args.v4 else args.model_version))
     try:
-        model_file = resolve_model_path(args.model)
+        model_file = resolve_model_path(args.model, version=req_version)
     except FileNotFoundError as e:
         print(f"[ERROR] {e}", file=sys.stderr)
         sys.exit(1)

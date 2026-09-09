@@ -33,8 +33,10 @@ import numpy as np
 
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-DEFAULT_MODEL_PATH = os.path.join(SCRIPT_DIR, "models", "joint_yolo_classifier.pt")
-FALLBACK_MODEL_PATH = os.path.join(SCRIPT_DIR, "results", "joint_cls", "weights", "best.pt")
+DEFAULT_MODEL_V4_PATH = os.path.join(SCRIPT_DIR, "models", "joint_yolo_classifier_v4.pt")
+DEFAULT_MODEL_V2_PATH = os.path.join(SCRIPT_DIR, "models", "joint_yolo_classifier_v2.pt")
+DEFAULT_MODEL_V1_PATH = os.path.join(SCRIPT_DIR, "models", "joint_yolo_classifier.pt")
+FALLBACK_MODEL_PATH = os.path.join(SCRIPT_DIR, "results", "joint_cls_v4", "weights", "best.pt")
 
 COLLECTED_DIR = os.path.join(SCRIPT_DIR, "dataset", "collected")
 COLLECTED_HEALTHY_DIR = os.path.join(COLLECTED_DIR, "healthy")
@@ -54,8 +56,30 @@ def parse_args():
     parser.add_argument(
         "--model",
         type=str,
-        default=DEFAULT_MODEL_PATH,
-        help=f"Path to trained YOLO classification weights (default: {DEFAULT_MODEL_PATH})",
+        default=None,
+        help="Explicit path to trained YOLO classification weights (overrides --model-version)",
+    )
+    parser.add_argument(
+        "--model-version",
+        type=str,
+        choices=["v1", "v2", "v4"],
+        default="v4",
+        help="YOLO model version: 'v4' (default: fixed-framing calibrated), 'v2' (multi-distance), or 'v1' (close-up baseline)",
+    )
+    parser.add_argument(
+        "--v1",
+        action="store_true",
+        help="Shortcut to use v1 model (joint_yolo_classifier.pt)",
+    )
+    parser.add_argument(
+        "--v2",
+        action="store_true",
+        help="Shortcut to use v2 model (joint_yolo_classifier_v2.pt)",
+    )
+    parser.add_argument(
+        "--v4",
+        action="store_true",
+        help="Shortcut to use v4 model (joint_yolo_classifier_v4.pt, default)",
     )
     parser.add_argument(
         "--conf-thresh",
@@ -123,22 +147,70 @@ def parse_args():
     return parser.parse_args()
 
 
-def resolve_model_path(requested_path: str) -> str:
-    """Finds the trained YOLO weights file or throws an informative error."""
-    if os.path.isfile(requested_path):
-        return os.path.abspath(requested_path)
-    if os.path.isfile(FALLBACK_MODEL_PATH):
-        return os.path.abspath(FALLBACK_MODEL_PATH)
-    # Check results folder
+def resolve_model_path(requested_path: Optional[str] = None, version: str = "v4") -> Tuple[str, str]:
+    """
+    Finds the trained YOLO weights file or throws an informative error.
+    Returns (model_path, version_tag).
+    """
+    if requested_path:
+        if os.path.isfile(requested_path):
+            base_lower = os.path.basename(requested_path).lower()
+            if "v4" in base_lower:
+                tag = "v4"
+            elif "v3" in base_lower:
+                tag = "v3"
+            elif "v2" in base_lower:
+                tag = "v2"
+            elif "v1" in base_lower or "classifier.pt" in base_lower:
+                tag = "v1"
+            else:
+                tag = os.path.splitext(os.path.basename(requested_path))[0]
+            return os.path.abspath(requested_path), tag
+        raise FileNotFoundError(f"Requested YOLO model file does not exist: {requested_path}")
+
+    # Version v4 preference (default)
+    if version == "v4":
+        if os.path.isfile(DEFAULT_MODEL_V4_PATH):
+            return os.path.abspath(DEFAULT_MODEL_V4_PATH), "v4"
+        if os.path.isfile(FALLBACK_MODEL_PATH):
+            return os.path.abspath(FALLBACK_MODEL_PATH), "v4-fallback"
+        if os.path.isfile(DEFAULT_MODEL_V2_PATH):
+            print("[WARN] v4 model not found, falling back to v2 model.")
+            return os.path.abspath(DEFAULT_MODEL_V2_PATH), "v2"
+        if os.path.isfile(DEFAULT_MODEL_V1_PATH):
+            print("[WARN] v4 and v2 models not found, falling back to v1 model.")
+            return os.path.abspath(DEFAULT_MODEL_V1_PATH), "v1"
+
+    # Version v2 preference
+    if version == "v2":
+        if os.path.isfile(DEFAULT_MODEL_V2_PATH):
+            return os.path.abspath(DEFAULT_MODEL_V2_PATH), "v2"
+        fallback_v2 = os.path.join(SCRIPT_DIR, "results", "joint_cls_v2", "weights", "best.pt")
+        if os.path.isfile(fallback_v2):
+            return os.path.abspath(fallback_v2), "v2-fallback"
+        if os.path.isfile(DEFAULT_MODEL_V1_PATH):
+            print("[WARN] v2 model not found, falling back to v1 model.")
+            return os.path.abspath(DEFAULT_MODEL_V1_PATH), "v1"
+
+    # Version v1 preference
+    if version == "v1":
+        if os.path.isfile(DEFAULT_MODEL_V1_PATH):
+            return os.path.abspath(DEFAULT_MODEL_V1_PATH), "v1"
+        fallback_v1 = os.path.join(SCRIPT_DIR, "results", "joint_cls", "weights", "best.pt")
+        if os.path.isfile(fallback_v1):
+            return os.path.abspath(fallback_v1), "v1-fallback"
+
+    # Check results folder for any best.pt
     results_dir = os.path.join(SCRIPT_DIR, "results")
     if os.path.isdir(results_dir):
         for root, _, files in os.walk(results_dir):
             if "best.pt" in files:
-                return os.path.abspath(os.path.join(root, "best.pt"))
+                tag = "v4" if "v4" in root.lower() else ("v2" if "v2" in root.lower() else "v1")
+                return os.path.abspath(os.path.join(root, "best.pt")), tag
 
     raise FileNotFoundError(
         f"Trained YOLO model not found in check_yolo/models/\n"
-        f"Expected path: {os.path.abspath(requested_path)}\n"
+        f"Expected path: {DEFAULT_MODEL_V4_PATH} or {DEFAULT_MODEL_V2_PATH} or {DEFAULT_MODEL_V1_PATH}\n"
         f"Please run 'python check_yolo/train.py' to generate the model weights."
     )
 
@@ -282,8 +354,9 @@ def main():
     args = parse_args()
 
     # 1. Resolve and verify model weights
+    req_version = "v1" if args.v1 else ("v2" if args.v2 else ("v4" if args.v4 else args.model_version))
     try:
-        model_file = resolve_model_path(args.model)
+        model_file, model_tag = resolve_model_path(args.model, version=req_version)
     except FileNotFoundError as e:
         print(f"[ERROR] {e}", file=sys.stderr)
         sys.exit(1)
@@ -324,7 +397,7 @@ def main():
     print("JOINTGUARD YOLO WEBCAM INSPECTION")
     print("=" * 55)
     print(f"Camera source:        {args.source}")
-    print(f"Model:                {model_file}")
+    print(f"Model:                {model_file} [{model_tag.upper()}]")
     print(f"Pipeline Mode:        {mode_label}")
     print(f"Confidence threshold: {args.conf_thresh:.2f}")
     print(f"Fixed Search ROI:     ({rx1}, {ry1}, {rx2}, {ry2}) [resolution: {frame_w}x{frame_h}]")
@@ -580,8 +653,8 @@ def main():
             )
             cv2.putText(
                 display_frame,
-                f"Source: {args.source} | Pipeline: OpenCV -> YOLO",
-                (frame_w - 320, 24),
+                f"Source: {args.source} | YOLO {model_tag.upper()} | OpenCV->YOLO",
+                (frame_w - 380, 24),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.5,
                 (180, 180, 180),

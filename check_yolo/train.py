@@ -195,8 +195,10 @@ def main():
         best_weights_path = os.path.join(exp_dir, "weights", "last.pt")
 
     if os.path.isfile(best_weights_path):
-        shutil.copy2(best_weights_path, args.output_model)
-        print(f"[SAVED] Best model saved to: {args.output_model} ({os.path.getsize(args.output_model) / 1e6:.2f} MB)")
+        out_dest = os.path.abspath(args.output_model)
+        os.makedirs(os.path.dirname(out_dest), exist_ok=True)
+        shutil.copy2(best_weights_path, out_dest)
+        print(f"[SAVED] Best model saved to: {out_dest} ({os.path.getsize(out_dest) / 1e6:.2f} MB)")
     else:
         print(f"[WARNING] Weights file not found at expected path: {best_weights_path}")
 
