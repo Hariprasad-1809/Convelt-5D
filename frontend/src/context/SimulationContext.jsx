@@ -103,7 +103,207 @@ export function SimulationProvider({ children }) {
   const [lastUpdated, setLastUpdated] = useState(null);
   const [updateCount, setUpdateCount] = useState(0);
 
+  // ─── Hardware & Live Telemetry State ──────────────────────────────────────
+  const [dataSource, setDataSource] = useState('LIVE_HARDWARE');
+  const [wsStatus, setWsStatus] = useState('CONNECTING'); // CONNECTING, CONNECTED, DISCONNECTED, RECONNECTING, ERROR
+  const [hardwareStatus, setHardwareStatus] = useState({
+    device_id: 'ARDUINO_UNO_01',
+    connection_status: 'DISCONNECTED',
+    serial_status: 'DISCONNECTED',
+    websocket_status: 'DISCONNECTED',
+    port: 'COM4',
+    baud: 9600,
+    lastUpdated: null,
+    temperature: null,
+    vibration: null,
+    hall_detected: false,
+    motor_speed: 0,
+    motor_running: false,
+  });
+
+  const [rawSerialLogs, setRawSerialLogs] = useState([]);
   const isPollingRef = useRef(false);
+
+  // WebSocket Lifecycle Refs
+  const wsRef = useRef(null);
+  const reconnectTimeoutRef = useRef(null);
+  const reconnectAttemptsRef = useRef(0);
+  const socketCounterRef = useRef(0);
+
+  // ─── Centralized Telemetry WebSocket Gateway ─────────────────────────────
+  useEffect(() => {
+    let isMounted = true;
+
+    const connectWebSocket = () => {
+      // 1. Prevent duplicate active connections
+      if (wsRef.current && (wsRef.current.readyState === WebSocket.OPEN || wsRef.current.readyState === WebSocket.CONNECTING)) {
+        return;
+      }
+
+      // 2. Clear any pending reconnect timer
+      if (reconnectTimeoutRef.current) {
+        clearTimeout(reconnectTimeoutRef.current);
+        reconnectTimeoutRef.current = null;
+      }
+
+      const socketId = ++socketCounterRef.current;
+      const wsUrl = API_BASE.replace(/^http/, 'ws') + '/api/v1/ws/telemetry';
+
+      setWsStatus(reconnectAttemptsRef.current > 0 ? 'RECONNECTING' : 'CONNECTING');
+
+      try {
+        const ws = new WebSocket(wsUrl);
+        wsRef.current = ws;
+
+        ws.onopen = () => {
+          if (!isMounted || socketId !== socketCounterRef.current) return;
+          console.log('[WS] Connected to JointGuard WebSocket Gateway');
+          setWsStatus('CONNECTED');
+          setHardwareStatus((prev) => ({ ...prev, websocket_status: 'CONNECTED' }));
+          reconnectAttemptsRef.current = 0;
+        };
+
+        ws.onmessage = (event) => {
+          if (!isMounted || socketId !== socketCounterRef.current) return;
+          try {
+            const data = JSON.parse(event.data);
+
+            if (data.type === 'sensor_telemetry') {
+              const serialStat = data.serial_status || data.connection_status || 'CONNECTED';
+              setHardwareStatus((prev) => ({
+                ...prev,
+                device_id: data.device_id || 'ARDUINO_UNO_01',
+                connection_status: serialStat,
+                serial_status: serialStat,
+                websocket_status: 'CONNECTED',
+                port: data.port || prev.port || 'COM4',
+                baud: data.baud || prev.baud || 9600,
+                temperature: data.temperature,
+                vibration: data.vibration,
+                hall_detected: data.hall_detected,
+                motor_speed: data.motor_speed,
+                motor_running: data.motor_running,
+                lastUpdated: data.timestamp,
+              }));
+
+              const timeStr = new Date(data.timestamp || Date.now()).toLocaleTimeString();
+              const logBlock = [
+                `[${timeStr}] Temperature : ${data.temperature != null ? data.temperature.toFixed(2) + ' C' : 'ERROR'} [NORMAL]`,
+                `[${timeStr}] Vibration   : ${data.vibration != null ? data.vibration.toFixed(2) + ' m/s2' : 'ERROR'} [NORMAL]`,
+                `[${timeStr}] Hall Sensor : ${data.hall_detected ? 'MAGNET DETECTED' : 'NO MAGNET'}`,
+                `[${timeStr}] Motor Speed : ${data.motor_speed ?? 0}%`,
+                `[${timeStr}] Motor       : ${data.motor_running ? 'RUNNING' : 'STOPPED'}`,
+              ];
+              setRawSerialLogs((prev) => [...logBlock, ...prev].slice(0, 50));
+
+              const targetJid = data.joint_id || 'J01';
+              setJoints((prevJoints) => {
+                const existing = prevJoints[targetJid] || {};
+                const now = Date.now();
+                const label = timeLabel(new Date(now));
+
+                const tempHist = existing.temperatureHistory || [];
+                const vibHist = existing.vibrationHistory || [];
+
+                const newTempHist = data.temperature != null
+                  ? [...tempHist.slice(-(HISTORY_MAX - 1)), { timestamp: now, time: label, value: data.temperature }]
+                  : tempHist;
+
+                const newVibHist = data.vibration != null
+                  ? [...vibHist.slice(-(HISTORY_MAX - 1)), { timestamp: now, time: label, value: data.vibration }]
+                  : vibHist;
+
+                return {
+                  ...prevJoints,
+                  [targetJid]: {
+                    ...existing,
+                    temperature: data.temperature ?? existing.temperature,
+                    vibration: data.vibration ?? existing.vibration,
+                    hall_event: data.hall_detected ?? existing.hall_event,
+                    motor_speed: data.motor_speed ?? existing.motor_speed,
+                    motor_running: data.motor_running ?? existing.motor_running,
+                    health_score: data.health_score ?? existing.health_score,
+                    risk_level: data.risk_level ?? existing.risk_level,
+                    temperatureHistory: newTempHist,
+                    vibrationHistory: newVibHist,
+                    lastUpdated: data.timestamp,
+                  },
+                };
+              });
+            } else if (data.type === 'connection_status') {
+              const serialStat = data.serial_status || data.connection_status || 'DISCONNECTED';
+              setHardwareStatus((prev) => ({
+                ...prev,
+                device_id: data.device_id || 'ARDUINO_UNO_01',
+                connection_status: serialStat,
+                serial_status: serialStat,
+                websocket_status: 'CONNECTED',
+                port: data.port || 'COM4',
+                baud: data.baud || 9600,
+              }));
+            }
+          } catch (e) {
+            console.error('[WS] Error parsing WebSocket telemetry payload:', e);
+          }
+        };
+
+        ws.onclose = () => {
+          if (!isMounted || socketId !== socketCounterRef.current) return;
+          console.warn('[WS] Telemetry WebSocket connection closed.');
+          setWsStatus('DISCONNECTED');
+          setHardwareStatus((prev) => ({ ...prev, websocket_status: 'DISCONNECTED' }));
+
+          if (wsRef.current === ws) {
+            wsRef.current = null;
+          }
+
+          // Automatic reconnect with exponential backoff (capped at 5s)
+          reconnectAttemptsRef.current += 1;
+          const delay = Math.min(1000 * Math.pow(2, Math.min(reconnectAttemptsRef.current - 1, 2)), 5000);
+          reconnectTimeoutRef.current = setTimeout(() => {
+            if (isMounted) connectWebSocket();
+          }, delay);
+        };
+
+        ws.onerror = (err) => {
+          if (!isMounted || socketId !== socketCounterRef.current) return;
+          console.error('[WS] Telemetry WebSocket error:', err);
+          setWsStatus('ERROR');
+        };
+      } catch (e) {
+        if (!isMounted || socketId !== socketCounterRef.current) return;
+        setWsStatus('ERROR');
+        reconnectAttemptsRef.current += 1;
+        const delay = Math.min(1000 * Math.pow(2, Math.min(reconnectAttemptsRef.current - 1, 2)), 5000);
+        reconnectTimeoutRef.current = setTimeout(() => {
+          if (isMounted) connectWebSocket();
+        }, delay);
+      }
+    };
+
+    connectWebSocket();
+
+    return () => {
+      isMounted = false;
+      if (reconnectTimeoutRef.current) {
+        clearTimeout(reconnectTimeoutRef.current);
+        reconnectTimeoutRef.current = null;
+      }
+      if (wsRef.current) {
+        const wsToClose = wsRef.current;
+        wsRef.current = null;
+        // Unbind handlers before closing to prevent orphaned callbacks
+        wsToClose.onopen = null;
+        wsToClose.onmessage = null;
+        wsToClose.onclose = null;
+        wsToClose.onerror = null;
+        if (wsToClose.readyState === WebSocket.CONNECTING || wsToClose.readyState === WebSocket.OPEN) {
+          wsToClose.close();
+        }
+      }
+    };
+  }, []);
+
 
   // ─── Fetch All Data from FastAPI Backend ──────────────────────────────────────
   const fetchAllData = useCallback(async () => {
@@ -144,8 +344,14 @@ export function SimulationProvider({ children }) {
           }
 
           const prevJoint = updatedJoints[jid] || {};
-          const currentTemp = sensorData?.temperature ?? j.temperature ?? prevJoint.temperature ?? 36.5;
-          const currentVib = sensorData?.vibration ?? j.vibration ?? prevJoint.vibration ?? 1.5;
+          let currentTemp = sensorData?.temperature ?? j.temperature ?? prevJoint.temperature ?? 36.5;
+          let currentVib = sensorData?.vibration ?? j.vibration ?? prevJoint.vibration ?? 1.5;
+
+          if (jid === 'J01' && (hardwareStatus?.connection_status === 'CONNECTED' || hardwareStatus?.serial_status === 'CONNECTED') && hardwareStatus?.temperature != null) {
+            currentTemp = hardwareStatus.temperature;
+            currentVib = hardwareStatus.vibration ?? currentVib;
+          }
+
           const currentRisk = j.risk_level || 'LOW';
           const uiStatus = RISK_TO_STATUS[currentRisk] || STATUS.NORMAL;
           const score = j.health_score != null ? Math.round(j.health_score) : computeConditionScore(currentTemp, currentVib);
@@ -286,6 +492,29 @@ export function SimulationProvider({ children }) {
         console.debug('Error fetching simulation status:', e);
       }
 
+      // 6. Fetch hardware status
+      try {
+        const hwRes = await fetch(`${API_BASE}/joints/hardware/status`);
+        if (hwRes.ok) {
+          const hwData = await hwRes.json();
+          setHardwareStatus((prev) => ({
+            ...prev,
+            device_id: hwData.device_id || 'ARDUINO_UNO_01',
+            connection_status: hwData.connection_status || hwData.status || 'DISCONNECTED',
+            port: hwData.port || 'COM4',
+            baud: hwData.baud || 9600,
+            lastUpdated: hwData.last_updated || prev.lastUpdated,
+            temperature: hwData.latest_telemetry?.temperature ?? prev.temperature,
+            vibration: hwData.latest_telemetry?.vibration ?? prev.vibration,
+            hall_detected: hwData.latest_telemetry?.hall_detected ?? prev.hall_detected,
+            motor_speed: hwData.latest_telemetry?.motor_speed ?? prev.motor_speed,
+            motor_running: hwData.latest_telemetry?.motor_running ?? prev.motor_running,
+          }));
+        }
+      } catch (e) {
+        console.debug('Error fetching hardware status:', e);
+      }
+
       setApiConnected(true);
       setLastUpdated(nowISO());
       setUpdateCount((c) => c + 1);
@@ -382,6 +611,13 @@ export function SimulationProvider({ children }) {
     updateCount,
     apiConnected,
 
+    // Hardware Telemetry & Connection
+    hardwareStatus,
+    wsStatus,
+    rawSerialLogs,
+    dataSource,
+    setDataSource,
+
     // Simulation controls & status
     simStatus,
     startSimulation,
@@ -390,6 +626,7 @@ export function SimulationProvider({ children }) {
     stepSimulation,
     injectOverride,
     refreshData: fetchAllData,
+
 
     // Alert data & actions
     alerts,

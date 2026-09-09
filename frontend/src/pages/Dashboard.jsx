@@ -213,8 +213,9 @@ function HealthItem({ label, value, detail, ok }) {
 // ─── Dashboard ────────────────────────────────────────────────────────────────
 export default function Dashboard() {
   const navigate = useNavigate();
-  const { joints, lastUpdated } = useLiveSensorData();
+  const { joints, lastUpdated, hardwareStatus, apiConnected } = useLiveSensorData();
   const { activeAlerts, summary } = useAlerts();
+
 
   const [quickViewId, setQuickViewId] = useState(null);
   const [selectedChartJoint, setSelectedChartJoint] = useState('J01');
@@ -312,12 +313,13 @@ export default function Dashboard() {
         />
         <MetricCard
           icon={<Radio size={15} />}
-          label="ESP32 Connectivity"
-          value={MOCK_SYSTEM_STATUS.esp32.connected ? 'Connected' : 'Offline'}
+          label="Hardware Node (UNO)"
+          value={hardwareStatus?.connection_status === 'CONNECTED' ? 'Connected' : (apiConnected ? `Ready (${hardwareStatus?.port || 'COM4'})` : 'Offline')}
           unit=""
-          status={connStatus}
-          subtext={`${MOCK_SYSTEM_STATUS.esp32.ipAddress} · ${MOCK_SYSTEM_STATUS.esp32.signalStrength} dBm`}
+          status={hardwareStatus?.connection_status === 'CONNECTED' ? STATUS.NORMAL : STATUS.HIGH}
+          subtext={`${hardwareStatus?.port || 'COM4'} @ ${hardwareStatus?.baud || 9600} Baud · USB Serial Gateway`}
         />
+
       </div>
 
       {/* ── 4. Live Charts with Joint Selector (J01 - J03) ── */}

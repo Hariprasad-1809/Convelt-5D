@@ -36,6 +36,9 @@ class SensorReading(Base):
     hall_event = Column(Boolean, nullable=True)     # A3144 Hall event detected (nullable if UNKNOWN)
     magnetic_value = Column(Float, nullable=True)  # HMC5883L optional magnetic vector (nullable)
     vision_score = Column(Float, nullable=True)    # Simulated / Manual vision score 0-100 (nullable)
+    motor_speed = Column(Integer, nullable=True)   # Motor speed percentage (0-100)
+    motor_running = Column(Boolean, nullable=True) # Motor execution state (True/False)
+
 
     # Component Scores (0-100 or UNKNOWN/Null)
     vibration_score = Column(Float, nullable=True)

@@ -19,14 +19,44 @@ class SystemMeta(BaseModel):
 # Raw Sensor & Manual Injection Models
 # ------------------------------------------------------------------------------
 class SensorReadingBase(BaseModel):
-    device_id: str = "ESP32_NODE_01"
+    device_id: str = "ARDUINO_UNO_01"
     joint_id: str
-    belt_position: float
+    belt_position: float = 0.0
     vibration: Optional[float] = Field(None, description="MPU6050 RMS m/s^2 deviation")
     temperature: Optional[float] = Field(None, description="DS18B20 °C")
     hall_event: Optional[bool] = Field(None, description="A3144 Hall event detected")
     magnetic_value: Optional[float] = Field(None, description="Optional HMC5883L vector value")
     vision_score: Optional[float] = Field(None, description="Simulated / Manual vision score 0-100")
+    motor_speed: Optional[int] = Field(None, description="Motor speed percentage (0-100%)")
+    motor_running: Optional[bool] = Field(None, description="Motor running state")
+    connection_status: str = Field(default="CONNECTED", description="Hardware serial connection status")
+
+class ArduinoTelemetryPayload(BaseModel):
+    type: str = "sensor_telemetry"
+    data_source: str = "LIVE_HARDWARE"
+    device_id: str = "ARDUINO_UNO_01"
+    joint_id: str = "J01"
+    timestamp: datetime
+    temperature: Optional[float] = None
+    temperature_status: str = "NORMAL"
+    vibration: Optional[float] = None
+    vibration_status: str = "NORMAL"
+    hall_detected: Optional[bool] = False
+    motor_speed: Optional[int] = 0
+    motor_running: Optional[bool] = False
+    health_score: Optional[float] = None
+    risk_level: str = "LOW"
+    connection_status: str = "CONNECTED"
+
+class SerialStatusPayload(BaseModel):
+    type: str = "connection_status"
+    device_id: str = "ARDUINO_UNO_01"
+    port: str = "COM4"
+    baud: int = 9600
+    connection_status: str = "DISCONNECTED"
+    message: str = ""
+    timestamp: datetime
+
 
 class SimulationInjectRequest(BaseModel):
     joint_id: str
