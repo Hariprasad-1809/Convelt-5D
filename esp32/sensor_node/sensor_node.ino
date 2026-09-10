@@ -245,10 +245,11 @@ void setup()
 void loop()
 {
   // ===================================================
-  // CHECK BUTTONS CONTINUOUSLY
+  // CHECK BUTTONS & SERIAL COMMANDS CONTINUOUSLY
   // ===================================================
 
   checkButtons();
+  checkSerialCommands();
 
   // ===================================================
   // KEEP MOTOR RUNNING
@@ -625,4 +626,41 @@ void setMotorSpeed()
     MOTOR_PWM_PIN,
     pwmValue
   );
+}
+
+// =====================================================
+// SERIAL COMMAND LISTENER (NON-BLOCKING)
+// =====================================================
+
+void checkSerialCommands()
+{
+  while (Serial.available() > 0)
+  {
+    String cmd = Serial.readStringUntil('\n');
+    cmd.trim();
+    cmd.toUpperCase();
+
+    if (cmd == "STOP")
+    {
+      motorRunning = false;
+      analogWrite(MOTOR_PWM_PIN, 0);
+
+      Serial.println();
+      Serial.println("================================");
+      Serial.println("COMMAND RECEIVED: STOP");
+      Serial.println("Motor STOPPED");
+      Serial.println("================================");
+    }
+    else if (cmd == "RESUME" || cmd == "START")
+    {
+      motorRunning = true;
+      setMotorSpeed();
+
+      Serial.println();
+      Serial.println("================================");
+      Serial.println("COMMAND RECEIVED: RESUME");
+      Serial.println("Motor STARTED");
+      Serial.println("================================");
+    }
+  }
 }

@@ -37,6 +37,7 @@ def get_latest_vision():
 
 async def _generate_mjpeg_stream():
     """Generator function that yields JPEG frames as an MJPEG stream."""
+    vision_service.increment_stream_viewers()
     try:
         while True:
             frame_bytes = vision_service.get_latest_jpeg()
@@ -52,6 +53,8 @@ async def _generate_mjpeg_stream():
     except (asyncio.CancelledError, Exception):
         # Client disconnected cleanly
         pass
+    finally:
+        vision_service.decrement_stream_viewers()
 
 
 @router.get("/stream")
@@ -64,4 +67,37 @@ async def get_vision_stream():
         _generate_mjpeg_stream(),
         media_type="multipart/x-mixed-replace; boundary=frame"
     )
+
+
+@router.post("/resume")
+def resume_motor():
+    """
+    Sends RESUME command to Arduino conveyor motor and resets the damage auto-stop interlock guard.
+    """
+    from backend.services.serial_service import serial_service
+    sent = serial_service.send_command("RESUME")
+    vision_service.reset_stop_guard()
+    return {
+        "status": "ok" if sent else "error",
+        "command": "RESUME",
+        "serial_sent": sent,
+        "motor_stop_triggered": False,
+        "message": "Conveyor motor resume signal sent to Arduino" if sent else "Failed to send RESUME signal over serial"
+    }
+
+
+@router.post("/stop")
+def stop_motor():
+    """
+    Manual emergency stop for Arduino conveyor motor.
+    """
+    from backend.services.serial_service import serial_service
+    sent = serial_service.send_command("STOP")
+    return {
+        "status": "ok" if sent else "error",
+        "command": "STOP",
+        "serial_sent": sent,
+        "message": "Conveyor motor stop signal sent to Arduino" if sent else "Failed to send STOP signal over serial"
+    }
+
 

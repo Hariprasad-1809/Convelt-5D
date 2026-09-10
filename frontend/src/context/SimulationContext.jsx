@@ -618,6 +618,29 @@ export function SimulationProvider({ children }) {
     );
   }, []);
 
+  // ─── Motor Interlock Actions ─────────────────────────────────────────────
+  const resumeMotor = useCallback(async () => {
+    try {
+      const res = await fetch(`${API_BASE}/api/v1/vision/resume`, { method: 'POST' });
+      const data = await res.json();
+      return data;
+    } catch (err) {
+      console.error('Failed to resume motor:', err);
+      return { status: 'error', message: err.message };
+    }
+  }, []);
+
+  const stopMotor = useCallback(async () => {
+    try {
+      const res = await fetch(`${API_BASE}/api/v1/vision/stop`, { method: 'POST' });
+      const data = await res.json();
+      return data;
+    } catch (err) {
+      console.error('Failed to stop motor:', err);
+      return { status: 'error', message: err.message };
+    }
+  }, []);
+
   // ─── Derived Alert Values ─────────────────────────────────────────────────────
   const activeAlerts = alerts.filter((a) => a.active);
   const resolvedAlerts = alerts.filter((a) => !a.active);
@@ -647,6 +670,9 @@ export function SimulationProvider({ children }) {
     visionData,
     cameraStatus,
 
+    // Motor Interlock Actions
+    resumeMotor,
+    stopMotor,
 
     // Simulation controls & status
     simStatus,

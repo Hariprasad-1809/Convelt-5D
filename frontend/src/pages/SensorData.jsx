@@ -5,7 +5,7 @@ import { getValueStatus } from '../data/mockData';
 import { DEFAULT_THRESHOLDS, JOINT_IDS, SENSOR_INFO } from '../data/constants';
 import StatusBadge from '../components/ui/StatusBadge';
 import SensorChart from '../components/ui/SensorChart';
-import CameraVision from '../components/ui/CameraVision';
+import VisionResultPanel from '../components/ui/VisionResultPanel';
 
 const TIME_RANGES = [
   { label: '1 min', points: 15 },
@@ -31,7 +31,7 @@ function SensorStatusRow({ label, sensor, connected }) {
 }
 
 export default function SensorData() {
-  const { joints = {}, lastUpdated, apiConnected, simStatus, hardwareStatus, wsStatus = 'CONNECTING', rawSerialLogs = [], visionData, cameraStatus } = useSimulation();
+  const { joints = {}, lastUpdated, apiConnected, simStatus, hardwareStatus, wsStatus = 'CONNECTING', rawSerialLogs = [] } = useSimulation();
 
 
   const [selectedJoint, setSelectedJoint] = useState('J01');
@@ -162,11 +162,6 @@ export default function SensorData() {
         </div>
       </div>
 
-      {/* Live YOLO Camera Vision Inspector Component */}
-      <div style={{ marginBottom: '20px' }}>
-        <CameraVision visionData={visionData} cameraStatus={cameraStatus} activeJoint={selectedJoint} />
-      </div>
-
       {/* Live Arduino UNO Hardware Telemetry & Raw Serial Monitor Box */}
       <div className="card" style={{ marginBottom: '20px', padding: '16px' }}>
 
@@ -255,6 +250,9 @@ export default function SensorData() {
           )}
         </div>
       </div>
+
+      {/* ── Vision Inspection & Automated Motor Interlock ── */}
+      <VisionResultPanel />
 
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 280px', gap: '20px', marginBottom: '20px' }}>
         {/* Left: Charts + Filters */}

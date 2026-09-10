@@ -191,6 +191,25 @@ class SerialReaderService:
                 logger.warning(f"[SERIAL] Error closing port: {e}")
         self.connection_status = "DISCONNECTED"
 
+    def send_command(self, command: str) -> bool:
+        """
+        Transmits an ASCII command string (e.g. 'STOP' or 'RESUME') to Arduino UNO over active serial port.
+        """
+        cmd_clean = command.strip().upper()
+        if not self._serial_conn or not self._serial_conn.is_open:
+            logger.error(f"[SERIAL] Cannot send command '{cmd_clean}': Serial port {self.port} is closed or disconnected")
+            return False
+
+        try:
+            cmd_payload = f"{cmd_clean}\n".encode("utf-8")
+            self._serial_conn.write(cmd_payload)
+            self._serial_conn.flush()
+            logger.warning(f"[SERIAL COMMAND SENT] -> Arduino: {cmd_clean}")
+            return True
+        except Exception as e:
+            logger.error(f"[SERIAL] Failed to write command '{cmd_clean}' to port {self.port}: {e}")
+            return False
+
     def _run_loop(self):
         """Main thread loop handling connection, reading, and reconnection logic."""
         while self._running:

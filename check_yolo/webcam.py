@@ -54,8 +54,8 @@ def parse_args():
     parser.add_argument(
         "--source",
         type=int,
-        default=1,
-        help="Webcam device index (default: 1)",
+        default=0,
+        help="Webcam device index (default: 0)",
     )
     parser.add_argument(
         "--model",
@@ -933,31 +933,48 @@ def main():
         print(f"[ERROR] {e}", file=sys.stderr)
         sys.exit(1)
 
+    sources_to_try = [args.source]
+    for alt in [0, 1]:
+        if alt not in sources_to_try:
+            sources_to_try.append(alt)
+
     cap = None
-    if sys.platform.startswith("win"):
-        cap_ds = cv2.VideoCapture(args.source, cv2.CAP_DSHOW)
-        if cap_ds and cap_ds.isOpened():
-            ret_ds, _ = cap_ds.read()
-            if ret_ds:
-                cap = cap_ds
-            else:
+    active_source = args.source
+    test_frame = None
+
+    for src in sources_to_try:
+        if sys.platform.startswith("win"):
+            cap_ds = cv2.VideoCapture(src, cv2.CAP_DSHOW)
+            if cap_ds and cap_ds.isOpened():
+                cap_ds.set(cv2.CAP_PROP_FRAME_WIDTH, args.width)
+                cap_ds.set(cv2.CAP_PROP_FRAME_HEIGHT, args.height)
+                ret_ds, frame_ds = cap_ds.read()
+                if ret_ds and frame_ds is not None:
+                    cap = cap_ds
+                    test_frame = frame_ds
+                    active_source = src
+                    break
                 cap_ds.release()
 
-    if cap is None:
-        cap = cv2.VideoCapture(args.source)
+        cap_std = cv2.VideoCapture(src)
+        if cap_std and cap_std.isOpened():
+            cap_std.set(cv2.CAP_PROP_FRAME_WIDTH, args.width)
+            cap_std.set(cv2.CAP_PROP_FRAME_HEIGHT, args.height)
+            ret_std, frame_std = cap_std.read()
+            if ret_std and frame_std is not None:
+                cap = cap_std
+                test_frame = frame_std
+                active_source = src
+                break
+            cap_std.release()
 
-    if not cap.isOpened():
-        print(f"[ERROR] Could not open webcam source {args.source}.", file=sys.stderr)
+    if cap is None or test_frame is None:
+        print(f"[ERROR] Could not open or capture from any camera source ({sources_to_try}).", file=sys.stderr)
         sys.exit(1)
 
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, args.width)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, args.height)
-
-    ret, test_frame = cap.read()
-    if not ret or test_frame is None:
-        print(f"[ERROR] Failed to capture test frame from source {args.source}.", file=sys.stderr)
-        cap.release()
-        sys.exit(1)
+    if active_source != args.source:
+        print(f"[INFO] Camera source {args.source} unavailable. Automatically connected to camera source {active_source}.")
+    args.source = active_source
 
     frame_h, frame_w = test_frame.shape[:2]
 

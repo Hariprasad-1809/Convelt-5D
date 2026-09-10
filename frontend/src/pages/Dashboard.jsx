@@ -16,8 +16,8 @@ import StatusBadge from '../components/ui/StatusBadge';
 import SensorChart from '../components/ui/SensorChart';
 import AlertBanner from '../components/dashboard/AlertBanner';
 import SimulationControls from '../components/dashboard/SimulationControls';
+import VisionResultPanel from '../components/ui/VisionResultPanel';
 import Modal from '../components/ui/Modal';
-import CameraVision from '../components/ui/CameraVision';
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -190,7 +190,7 @@ function HealthItem({ label, value, detail, ok }) {
 // ─── Dashboard ────────────────────────────────────────────────────────────────
 export default function Dashboard() {
   const navigate = useNavigate();
-  const { joints, lastUpdated, hardwareStatus, apiConnected, visionData, cameraStatus } = useLiveSensorData();
+  const { joints, lastUpdated, hardwareStatus, apiConnected } = useLiveSensorData();
   const { activeAlerts, summary } = useAlerts();
 
   const [quickViewId, setQuickViewId] = useState(null);
@@ -297,10 +297,8 @@ export default function Dashboard() {
         />
       </div>
 
-      {/* ── Live YOLO Camera Vision Inspector Component ── */}
-      <div style={{ marginBottom: '20px' }}>
-        <CameraVision visionData={visionData} cameraStatus={cameraStatus} activeJoint={selectedChartJoint} />
-      </div>
+      {/* ── Vision Inspection & Automated Motor Interlock ── */}
+      <VisionResultPanel />
 
       {/* ── 4. Live Charts with Joint Selector (J01 - J03) ── */}
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '12px', flexWrap: 'wrap', gap: '8px' }}>

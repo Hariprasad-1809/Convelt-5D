@@ -767,6 +767,17 @@ class VisionService:
         self.camera_status = "DISCONNECTED"
 
         self.latest_frame_jpeg: Optional[bytes] = None
+        self.stream_viewer_count: int = 0
+        self.stopped_damage_joint_ids = set()
+        self.motor_stop_triggered: bool = False
+        self.last_stopped_joint_id: Optional[str] = None
+        self.last_stopped_timestamp: Optional[str] = None
+
+        self.current_fps: float = 0.0
+        self.last_inference_ms: float = 0.0
+        self._fps_frame_count: int = 0
+        self._fps_start_time: float = time.time()
+
         self.latest_result: Dict[str, Any] = {
             "type": "vision_update",
             "joint_id": "J01",
@@ -778,6 +789,11 @@ class VisionService:
             "valid_frame_count": 0,
             "rejected_blurry_count": 0,
             "sharpness": 0.0,
+            "motor_stop_triggered": False,
+            "stopped_joint_id": None,
+            "stopped_timestamp": None,
+            "fps": 0.0,
+            "latency_ms": 0.0,
             "timestamp": datetime.datetime.now().isoformat(),
         }
 
@@ -793,6 +809,25 @@ class VisionService:
         )
         self._lock = threading.Lock()
         self._event_loop: Optional[asyncio.AbstractEventLoop] = None
+
+    def increment_stream_viewers(self):
+        with self._lock:
+            self.stream_viewer_count += 1
+            print(f"[VISION SERVICE] Stream viewer connected (Active viewers: {self.stream_viewer_count})")
+
+    def decrement_stream_viewers(self):
+        with self._lock:
+            self.stream_viewer_count = max(0, self.stream_viewer_count - 1)
+            print(f"[VISION SERVICE] Stream viewer disconnected (Active viewers: {self.stream_viewer_count})")
+
+    def reset_stop_guard(self):
+        """Reset motor stop guard (e.g. after operator resumes conveyor)."""
+        with self._lock:
+            self.motor_stop_triggered = False
+            self.stopped_damage_joint_ids.clear()
+            self.last_stopped_joint_id = None
+            self.last_stopped_timestamp = None
+            print("[VISION SERVICE] Motor stop interlock guard reset")
 
 
     def load_model(self) -> bool:
@@ -890,8 +925,19 @@ class VisionService:
                 continue
 
             consecutive_failures = 0
+            t_frame_start = time.perf_counter()
             self._process_frame(frame)
-            time.sleep(0.03)
+            t_frame_end = time.perf_counter()
+            self.last_inference_ms = round((t_frame_end - t_frame_start) * 1000.0, 1)
+
+            self._fps_frame_count += 1
+            now = time.time()
+            if now - self._fps_start_time >= 1.0:
+                self.current_fps = round(self._fps_frame_count / (now - self._fps_start_time), 1)
+                self._fps_frame_count = 0
+                self._fps_start_time = now
+
+            time.sleep(0.001)
 
     def _process_frame(self, frame: np.ndarray):
         h, w = frame.shape[:2]
@@ -959,6 +1005,53 @@ class VisionService:
         elif final_label == "DAMAGE":
             vision_score = round((1.0 - final_conf) * 100.0, 2)
 
+        jid = eval_res["joint_id"]
+
+        # Automated Motor Stop & Alert on Confirmed High-Confidence Damage Detection
+        if final_label == "DAMAGE" and final_conf >= self.damage_thresh:
+            if jid not in self.stopped_damage_joint_ids:
+                print(f"[CRITICAL SAFETY INTERLOCK] Confirmed DAMAGE on joint {jid} ({final_conf*100:.1f}%). Issuing STOP to conveyor motor!")
+                from backend.services.serial_service import serial_service
+                cmd_sent = serial_service.send_command("STOP")
+                with self._lock:
+                    self.stopped_damage_joint_ids.add(jid)
+                    self.motor_stop_triggered = True
+                    self.last_stopped_joint_id = jid
+                    self.last_stopped_timestamp = datetime.datetime.now().isoformat()
+
+                if not cmd_sent:
+                    print(f"[SAFETY ALERT ERROR] Failed to send STOP command over serial to Arduino for joint {jid}!")
+                    try:
+                        from backend.database.db import SessionLocal
+                        from backend.database import crud
+                        db = SessionLocal()
+                        try:
+                            crud.create_alert(
+                                db=db,
+                                alert_data={
+                                    "joint_id": jid,
+                                    "alert_type": "HARDWARE_COMMUNICATION_ERROR",
+                                    "severity": "HIGH",
+                                    "message": f"Failed to communicate STOP command to conveyor motor on confirmed damage of joint {jid}"
+                                }
+                            )
+                        finally:
+                            db.close()
+                    except Exception as ex:
+                        print(f"[ALERT DB ERROR] Failed to log hardware communication error alert: {ex}")
+
+            # Trigger existing vision damage alert
+            try:
+                from backend.database.db import SessionLocal
+                from backend.services.alert_service import trigger_vision_damage_alert
+                db = SessionLocal()
+                try:
+                    trigger_vision_damage_alert(db, jid, final_conf, vision_score or 8.0)
+                finally:
+                    db.close()
+            except Exception:
+                pass
+
         res = {
             "type": "vision_update",
             "joint_id": eval_res["joint_id"],
@@ -975,58 +1068,53 @@ class VisionService:
             "inspection_state": eval_res["inspection_state"],
             "camera_status": "CONNECTED",
             "model_status": "LOADED" if self.model_loaded else "NOT_LOADED",
+            "motor_stop_triggered": self.motor_stop_triggered,
+            "stopped_joint_id": self.last_stopped_joint_id,
+            "stopped_timestamp": self.last_stopped_timestamp,
+            "fps": self.current_fps,
+            "latency_ms": self.last_inference_ms,
             "timestamp": eval_res["timestamp"],
         }
 
-        # Trigger alert on high-confidence damage detection
-        if final_label == "DAMAGE" and final_conf >= self.damage_thresh:
-            try:
-                from backend.database.db import SessionLocal
-                from backend.services.alert_service import trigger_vision_damage_alert
-                db = SessionLocal()
-                try:
-                    trigger_vision_damage_alert(db, eval_res["joint_id"], final_conf, vision_score or 8.0)
-                finally:
-                    db.close()
-            except Exception:
-                pass
+        # HUD Overlays & JPEG encoding: ONLY executed if there is at least one active stream viewer
+        jpeg_bytes: Optional[bytes] = None
+        if self.stream_viewer_count > 0:
+            vis_frame = frame.copy()
+            cv2.rectangle(vis_frame, (x1, y1), (x2, y2), (255, 180, 0), 1)
 
-        # HUD Overlays on video frame for MJPEG stream
-        vis_frame = frame.copy()
-        cv2.rectangle(vis_frame, (x1, y1), (x2, y2), (255, 180, 0), 1)
+            iz_x1 = x1 + int(roi_w * 0.08)
+            iz_y1 = y1 + int(roi_h * 0.10)
+            iz_x2 = x1 + int(roi_w * 0.92)
+            iz_y2 = y1 + int(roi_h * 0.90)
+            cv2.rectangle(vis_frame, (iz_x1, iz_y1), (iz_x2, iz_y2), (0, 255, 255), 1)
 
-        iz_x1 = x1 + int(roi_w * 0.08)
-        iz_y1 = y1 + int(roi_h * 0.10)
-        iz_x2 = x1 + int(roi_w * 0.92)
-        iz_y2 = y1 + int(roi_h * 0.90)
-        cv2.rectangle(vis_frame, (iz_x1, iz_y1), (iz_x2, iz_y2), (0, 255, 255), 1)
+            if eval_res["smoothed_bbox"] is not None:
+                bx, by, bw, bh = eval_res["smoothed_bbox"]
+                color = (0, 255, 0) if final_label == "HEALTHY" else ((0, 0, 255) if final_label == "DAMAGE" else (0, 165, 255))
+                cv2.rectangle(vis_frame, (bx, by), (bx + bw, by + bh), color, 2)
+                txt = f"{eval_res['joint_id']}: {final_label} {final_conf*100:.1f}%" if final_conf > 0 else f"{eval_res['joint_id']}: {final_label}"
+                cv2.putText(vis_frame, txt, (bx, max(15, by - 8)), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
 
-        if eval_res["smoothed_bbox"] is not None:
-            bx, by, bw, bh = eval_res["smoothed_bbox"]
-            color = (0, 255, 0) if final_label == "HEALTHY" else ((0, 0, 255) if final_label == "DAMAGE" else (0, 165, 255))
-            cv2.rectangle(vis_frame, (bx, by), (bx + bw, by + bh), color, 2)
-            txt = f"{eval_res['joint_id']}: {final_label} {final_conf*100:.1f}%" if final_conf > 0 else f"{eval_res['joint_id']}: {final_label}"
-            cv2.putText(vis_frame, txt, (bx, max(15, by - 8)), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+            # Top Diagnostic HUD Box
+            hud_w, hud_h = 440, 140
+            cv2.rectangle(vis_frame, (10, 10), (10 + hud_w, 10 + hud_h), (15, 23, 42), -1)
+            cv2.rectangle(vis_frame, (10, 10), (10 + hud_w, 10 + hud_h), (51, 65, 85), 1)
 
-        # Top Diagnostic HUD Box
-        hud_w, hud_h = 440, 140
-        cv2.rectangle(vis_frame, (10, 10), (10 + hud_w, 10 + hud_h), (15, 23, 42), -1)
-        cv2.rectangle(vis_frame, (10, 10), (10 + hud_w, 10 + hud_h), (51, 65, 85), 1)
+            cv2.putText(vis_frame, f"JOINT: {eval_res['joint_id']} | Final: {final_label}", (20, 32), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (248, 250, 252), 2)
+            hp_pct = eval_res['p_healthy'] * 100.0
+            dp_pct = eval_res['p_damage'] * 100.0
+            cv2.putText(vis_frame, f"Current: {eval_res['current_label']} (H: {hp_pct:.1f}% | D: {dp_pct:.1f}%)", (20, 56), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (56, 189, 248), 1)
+            sharp_col = (74, 222, 128) if eval_res['sharpness'] >= self.min_sharpness else (248, 113, 113)
+            cv2.putText(vis_frame, f"Sharpness: {eval_res['sharpness']:.1f} (Min: {self.min_sharpness:.1f})", (20, 78), cv2.FONT_HERSHEY_SIMPLEX, 0.45, sharp_col, 1)
+            cv2.putText(vis_frame, f"Valid: {eval_res['valid_frame_count']}/{self.target_frames} | Rejected: {eval_res['rejected_blurry_count']}", (20, 100), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (251, 191, 36), 1)
 
-        cv2.putText(vis_frame, f"JOINT: {eval_res['joint_id']} | Final: {final_label}", (20, 32), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (248, 250, 252), 2)
-        hp_pct = eval_res['p_healthy'] * 100.0
-        dp_pct = eval_res['p_damage'] * 100.0
-        cv2.putText(vis_frame, f"Current: {eval_res['current_label']} (H: {hp_pct:.1f}% | D: {dp_pct:.1f}%)", (20, 56), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (56, 189, 248), 1)
-        sharp_col = (74, 222, 128) if eval_res['sharpness'] >= self.min_sharpness else (248, 113, 113)
-        cv2.putText(vis_frame, f"Sharpness: {eval_res['sharpness']:.1f} (Min: {self.min_sharpness:.1f})", (20, 78), cv2.FONT_HERSHEY_SIMPLEX, 0.45, sharp_col, 1)
-        cv2.putText(vis_frame, f"Valid: {eval_res['valid_frame_count']}/{self.target_frames} | Rejected: {eval_res['rejected_blurry_count']}", (20, 100), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (251, 191, 36), 1)
-
-        _, jpeg_buf = cv2.imencode(".jpg", vis_frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
-        jpeg_bytes = jpeg_buf.tobytes()
+            _, jpeg_buf = cv2.imencode(".jpg", vis_frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
+            jpeg_bytes = jpeg_buf.tobytes()
 
         with self._lock:
             self.latest_result = res
-            self.latest_frame_jpeg = jpeg_bytes
+            if jpeg_bytes is not None:
+                self.latest_frame_jpeg = jpeg_bytes
             self.camera_status = "CONNECTED"
 
         self._notify_subscribers(res)
