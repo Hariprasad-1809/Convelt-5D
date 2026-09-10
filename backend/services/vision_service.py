@@ -1,214 +1,50 @@
-#!/usr/bin/env python3
 """
-JointGuard YOLO Classification - Live Webcam Inspection Program
-Robust Moving-Belt Pipeline with Calibrated Confidence & Margin Gating:
+JointGuard Vision Service (FastAPI Background Integration)
 
-Features:
-- Default camera source: 1 (configurable via --source)
-- Motion Blur Rejection: Rejects blurry crops (Laplacian variance < min_sharpness)
-- Configurable Asymmetric Thresholds: DAMAGE_THRESH (0.70) & HEALTHY_THRESH (0.70)
-- Confidence Margin Gate: Requires |p_damage - p_healthy| >= CONF_MARGIN (0.15) before assigning DAMAGE/HEALTHY
-- Inner Inspection Zone: Only collects sharp frames when joint is inside central ROI zone
-- Multi-Frame Majority Voting: Accumulates sharp frames (e.g. 5) for stable decision
-- Quality Gate: Returns WAITING if fewer than required sharp frames (3/5) are collected
-- Diagnostic Debug Crop Saver: Saves crops to check_yolo/debug_crops/ for root-cause audit
-- Live HUD Overlay: Displays Healthy %, Damage %, Sharpness, Valid count, and Final verdict
-- End-of-Run Diagnostic Summary: Prints total counts & average confidence scores on exit
+Reuses the OpenCV specular joint localization & YOLOv8 classification pipeline
+from check_yolo/webcam.py for continuous live video joint monitoring.
 
-Usage:
-    python check_yolo/webcam.py
-    python check_yolo/webcam.py --source 1 --show-crop --damage-thresh 0.70 --healthy-thresh 0.70 --conf-margin 0.15
+Pipeline Features:
+  - Motion Blur Rejection (Laplacian Variance >= min_sharpness)
+  - Asymmetric Confidence Thresholding (DAMAGE_THRESH: 0.70, HEALTHY_THRESH: 0.70)
+  - Confidence Margin Gating (|p_damage - p_healthy| >= 0.15 required)
+  - Inner Inspection Zone Centering (prevents entry/exit border cutoffs)
+  - Multi-Frame Accumulation & Majority Voting (target 5 sharp frames)
+  - Quality Gate: Returns WAITING if fewer than required sharp frames (3/5) are collected
+  - Diagnostic JSONL Event Logger (data/joint_events.jsonl)
+  - Live HUD Overlays & MJPEG Streaming Endpoint (/api/v1/vision/stream)
+
+Calculates vision_score:
+  - HEALTHY: vision_score = round(final_confidence * 100, 2)
+  - DAMAGE:  vision_score = round((1 - final_confidence) * 100, 2)  (Lower score = worse condition!)
+  - UNCERTAIN / WAITING / LOW_QUALITY / NO_JOINT: vision_score = None
 """
 
-import argparse
+import asyncio
 from collections import deque
 import datetime
 import json
 import os
 import sys
+import threading
 import time
-from typing import Optional, Tuple, Dict, Any, List
+from typing import Optional, Dict, Any, Tuple, List
 
 import cv2
 import numpy as np
 
+from backend.config import settings
 
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-PROJECT_ROOT = os.path.abspath(os.path.join(SCRIPT_DIR, ".."))
-DEFAULT_MODEL_V4_PATH = os.path.join(SCRIPT_DIR, "models", "joint_yolo_classifier_v4.pt")
-DEFAULT_MODEL_V2_PATH = os.path.join(SCRIPT_DIR, "models", "joint_yolo_classifier_v2.pt")
-DEFAULT_MODEL_V1_PATH = os.path.join(SCRIPT_DIR, "models", "joint_yolo_classifier.pt")
-FALLBACK_MODEL_PATH = os.path.join(SCRIPT_DIR, "results", "joint_cls_v4", "weights", "best.pt")
+# Attempt importing Ultralytics YOLO
+try:
+    from ultralytics import YOLO
+    YOLO_AVAILABLE = True
+except ImportError:
+    YOLO_AVAILABLE = False
 
+
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 DEFAULT_JSONL_PATH = os.path.join(PROJECT_ROOT, "data", "joint_events.jsonl")
-DEBUG_CROPS_DIR = os.path.join(SCRIPT_DIR, "debug_crops")
-COLLECTED_DIR = os.path.join(SCRIPT_DIR, "dataset", "collected")
-COLLECTED_HEALTHY_DIR = os.path.join(COLLECTED_DIR, "healthy")
-COLLECTED_DAMAGE_DIR = os.path.join(COLLECTED_DIR, "damage")
-
-
-def parse_args():
-    parser = argparse.ArgumentParser(
-        description="JointGuard Live Webcam: Calibrated Confidence & Margin-Gated Moving-Belt Inspection Pipeline"
-    )
-    parser.add_argument(
-        "--source",
-        type=int,
-        default=1,
-        help="Webcam device index (default: 1)",
-    )
-    parser.add_argument(
-        "--model",
-        type=str,
-        default=None,
-        help="Explicit path to trained YOLO classification weights",
-    )
-    parser.add_argument(
-        "--model-version",
-        type=str,
-        choices=["v1", "v2", "v4"],
-        default="v4",
-        help="YOLO model version: 'v4' (default), 'v2', or 'v1'",
-    )
-    parser.add_argument(
-        "--v1", action="store_true", help="Shortcut for v1 model"
-    )
-    parser.add_argument(
-        "--v2", action="store_true", help="Shortcut for v2 model"
-    )
-    parser.add_argument(
-        "--v4", action="store_true", help="Shortcut for v4 model (default)"
-    )
-    parser.add_argument(
-        "--damage-thresh",
-        type=float,
-        default=0.70,
-        help="Minimum confidence threshold required to declare DAMAGE (default: 0.70)",
-    )
-    parser.add_argument(
-        "--healthy-thresh",
-        type=float,
-        default=0.70,
-        help="Minimum confidence threshold required to declare HEALTHY (default: 0.70)",
-    )
-    parser.add_argument(
-        "--conf-margin",
-        type=float,
-        default=0.15,
-        help="Minimum confidence margin between classes |p_damage - p_healthy| (default: 0.15)",
-    )
-    parser.add_argument(
-        "--min-sharpness",
-        type=float,
-        default=100.0,
-        help="Minimum Laplacian variance for motion blur filter (default: 100.0)",
-    )
-    parser.add_argument(
-        "--target-frames",
-        type=int,
-        default=5,
-        help="Number of valid sharp frames to accumulate for majority voting (default: 5)",
-    )
-    parser.add_argument(
-        "--roi",
-        type=str,
-        default="0.15,0.20,0.85,0.80",
-        help="Fixed Search ROI as 'x1,y1,x2,y2' (default: 0.15,0.20,0.85,0.80)",
-    )
-    parser.add_argument(
-        "--min-joint-area",
-        type=int,
-        default=600,
-        help="Minimum contour area to consider a joint candidate (default: 600)",
-    )
-    parser.add_argument(
-        "--min-joint-width",
-        type=int,
-        default=40,
-        help="Minimum bounding box width to consider a joint candidate (default: 40)",
-    )
-    parser.add_argument(
-        "--direct-roi",
-        action="store_true",
-        help="Bypass OpenCV joint detection and feed entire Search ROI directly to YOLO",
-    )
-    parser.add_argument(
-        "--show-crop",
-        action="store_true",
-        help="Open secondary window displaying the exact image crop sent to YOLO",
-    )
-    parser.add_argument(
-        "--save-debug-crops",
-        action="store_true",
-        help="Automatically save evaluation crops into check_yolo/debug_crops/ for audit",
-    )
-    parser.add_argument(
-        "--no-quality-check",
-        action="store_true",
-        help="Disable automatic dark/blur crop validation filter",
-    )
-    parser.add_argument(
-        "--jsonl-log",
-        type=str,
-        default=DEFAULT_JSONL_PATH,
-        help=f"Path to output diagnostic JSONL event log file (default: {DEFAULT_JSONL_PATH})",
-    )
-    parser.add_argument(
-        "--width",
-        type=int,
-        default=640,
-        help="Requested webcam width (default: 640)",
-    )
-    parser.add_argument(
-        "--height",
-        type=int,
-        default=480,
-        help="Requested webcam height (default: 480)",
-    )
-    return parser.parse_args()
-
-
-def resolve_model_path(requested_path: Optional[str] = None, version: str = "v4") -> Tuple[str, str]:
-    if requested_path:
-        if os.path.isfile(requested_path):
-            base_lower = os.path.basename(requested_path).lower()
-            tag = "v4" if "v4" in base_lower else ("v2" if "v2" in base_lower else "v1")
-            return os.path.abspath(requested_path), tag
-        raise FileNotFoundError(f"Requested YOLO model file does not exist: {requested_path}")
-
-    if version == "v4":
-        if os.path.isfile(DEFAULT_MODEL_V4_PATH):
-            return os.path.abspath(DEFAULT_MODEL_V4_PATH), "v4"
-        if os.path.isfile(FALLBACK_MODEL_PATH):
-            return os.path.abspath(FALLBACK_MODEL_PATH), "v4-fallback"
-
-    if os.path.isfile(DEFAULT_MODEL_V4_PATH):
-        return os.path.abspath(DEFAULT_MODEL_V4_PATH), "v4"
-    if os.path.isfile(DEFAULT_MODEL_V2_PATH):
-        return os.path.abspath(DEFAULT_MODEL_V2_PATH), "v2"
-    if os.path.isfile(DEFAULT_MODEL_V1_PATH):
-        return os.path.abspath(DEFAULT_MODEL_V1_PATH), "v1"
-
-    raise FileNotFoundError("Trained YOLO model not found in check_yolo/models/")
-
-
-def parse_roi_string(roi_str: str, frame_w: int, frame_h: int) -> Tuple[int, int, int, int]:
-    parts = [float(p.strip()) for p in roi_str.split(",")]
-    if len(parts) != 4:
-        raise ValueError(f"ROI must contain exactly 4 coordinates 'x1,y1,x2,y2', got '{roi_str}'")
-
-    x1, y1, x2, y2 = parts
-    if max(x1, y1, x2, y2) <= 1.0:
-        px1, py1 = int(x1 * frame_w), int(y1 * frame_h)
-        px2, py2 = int(x2 * frame_w), int(y2 * frame_h)
-    else:
-        px1, py1, px2, py2 = int(x1), int(y1), int(x2), int(y2)
-
-    px1 = max(0, min(frame_w - 10, px1))
-    py1 = max(0, min(frame_h - 10, py1))
-    px2 = max(px1 + 10, min(frame_w, px2))
-    py2 = max(py1 + 10, min(frame_h, py2))
-    return px1, py1, px2, py2
 
 
 def find_joint_in_roi(
@@ -338,6 +174,7 @@ def is_in_inner_inspection_zone(rel_bbox: Tuple[int, int, int, int], roi_w: int,
 
 
 def calculate_sharpness(crop: np.ndarray) -> float:
+    """Calculates Laplacian variance as a measure of focus/sharpness."""
     if crop is None or crop.size == 0:
         return 0.0
     gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
@@ -345,10 +182,7 @@ def calculate_sharpness(crop: np.ndarray) -> float:
 
 
 def check_crop_quality(crop: np.ndarray, min_sharpness: float = 100.0) -> Tuple[bool, str, float]:
-    """
-    Validates crop quality before sending to YOLO.
-    Rejects undersized, bad aspect ratio, dark, bright, or motion-blurred crops.
-    """
+    """Validates crop quality before sending to YOLO."""
     h, w = crop.shape[:2]
     if h < 25 or w < 25:
         return False, "TOO SMALL", 0.0
@@ -432,7 +266,6 @@ class JointTrack:
         rx, ry, rw, rh = raw_bbox
         sx, sy, sw, sh = self.smoothed_bbox
 
-        # Exponential Moving Average Bounding Box Smoothing
         nx = int(alpha * rx + (1.0 - alpha) * sx)
         ny = int(alpha * ry + (1.0 - alpha) * sy)
         nw = int(alpha * rw + (1.0 - alpha) * sw)
@@ -479,7 +312,7 @@ class JointGuardStateEngine:
         self.bbox_smooth_alpha = bbox_smooth_alpha
         self.jsonl_path = jsonl_path
         self.save_debug_crops = save_debug_crops
-        self.debug_crops_dir = debug_crops_dir or DEBUG_CROPS_DIR
+        self.debug_crops_dir = debug_crops_dir or os.path.join(PROJECT_ROOT, "check_yolo", "debug_crops")
 
         self.joint_counter = 1
         self.active_track: Optional[JointTrack] = None
@@ -801,264 +634,290 @@ class JointGuardStateEngine:
         except Exception:
             pass
 
-    def print_diagnostic_summary(self):
-        avg_h_conf = (sum(self.diag_healthy_confs) / len(self.diag_healthy_confs)) * 100.0 if self.diag_healthy_confs else 0.0
-        avg_d_conf = (sum(self.diag_damage_confs) / len(self.diag_damage_confs)) * 100.0 if self.diag_damage_confs else 0.0
-        print("\n" + "=" * 65)
-        print("JOINTGUARD DIAGNOSTIC SUMMARY")
-        print("=" * 65)
-        print(f"Total Evaluated Frames:       {self.diag_total_frames}")
-        print(f"Total Healthy Predictions:    {self.diag_healthy_count} (Avg Conf: {avg_h_conf:.1f}%)")
-        print(f"Total Damage Predictions:     {self.diag_damage_count} (Avg Conf: {avg_d_conf:.1f}%)")
-        print(f"Total Uncertain Predictions:  {self.diag_uncertain_count}")
-        print(f"Total Blurry Rejected:        {self.rejected_blurry_count}")
-        print("=" * 65 + "\n")
+
+# Backward Compatibility Alias
+JointEventTracker = JointGuardStateEngine
 
 
+class VisionService:
+    def __init__(self):
+        self.camera_index = settings.VISION_CAMERA_INDEX
+        self.model_path = settings.VISION_MODEL_PATH
+        self.damage_thresh = getattr(settings, "VISION_DAMAGE_THRESH", 0.70)
+        self.healthy_thresh = getattr(settings, "VISION_HEALTHY_THRESH", 0.70)
+        self.conf_margin = getattr(settings, "VISION_CONF_MARGIN", 0.15)
+        self.min_sharpness = getattr(settings, "VISION_MIN_SHARPNESS", 100.0)
+        self.target_frames = getattr(settings, "VISION_TARGET_FRAMES", 5)
 
-def main():
-    args = parse_args()
+        self.active_joint_id = "J01"
+        self.is_running = False
+        self.thread: Optional[threading.Thread] = None
+        self.cap: Optional[cv2.VideoCapture] = None
+        self.model = None
+        self.model_loaded = False
+        self.camera_status = "DISCONNECTED"
 
-    req_version = "v1" if args.v1 else ("v2" if args.v2 else ("v4" if args.v4 else args.model_version))
-    try:
-        model_file, model_tag = resolve_model_path(args.model, version=req_version)
-    except FileNotFoundError as e:
-        print(f"[ERROR] {e}", file=sys.stderr)
-        sys.exit(1)
+        self.latest_frame_jpeg: Optional[bytes] = None
+        self.latest_result: Dict[str, Any] = {
+            "type": "vision_update",
+            "joint_id": "J01",
+            "label": "WAITING",
+            "confidence": 0.0,
+            "vision_score": None,
+            "camera_status": "DISCONNECTED",
+            "model_status": "NOT_LOADED",
+            "valid_frame_count": 0,
+            "rejected_blurry_count": 0,
+            "sharpness": 0.0,
+            "timestamp": datetime.datetime.now().isoformat(),
+        }
 
-    cap = cv2.VideoCapture(args.source)
-    if not cap.isOpened():
-        print(f"[ERROR] Could not open webcam source {args.source}.", file=sys.stderr)
-        sys.exit(1)
+        self.tracker = JointGuardStateEngine(
+            target_frames=self.target_frames,
+            min_sharpness=self.min_sharpness,
+            damage_thresh=self.damage_thresh,
+            healthy_thresh=self.healthy_thresh,
+            conf_margin=self.conf_margin,
+            track_lost_timeout=1.5,
+            bbox_smooth_alpha=0.3,
+            jsonl_path=DEFAULT_JSONL_PATH
+        )
+        self._lock = threading.Lock()
+        self._event_loop: Optional[asyncio.AbstractEventLoop] = None
 
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, args.width)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, args.height)
 
-    ret, test_frame = cap.read()
-    if not ret or test_frame is None:
-        print(f"[ERROR] Failed to capture test frame from source {args.source}.", file=sys.stderr)
-        cap.release()
-        sys.exit(1)
+    def load_model(self) -> bool:
+        if not YOLO_AVAILABLE:
+            print("[VISION SERVICE ERROR] Ultralytics package not installed.")
+            return False
 
-    frame_h, frame_w = test_frame.shape[:2]
+        if not os.path.isfile(self.model_path):
+            print(f"[VISION SERVICE WARN] YOLO model weights not found at {self.model_path}")
+            return False
 
-    try:
-        rx1, ry1, rx2, ry2 = parse_roi_string(args.roi, frame_w, frame_h)
-    except Exception as e:
-        print(f"[ERROR] Invalid ROI format: {e}", file=sys.stderr)
-        cap.release()
-        sys.exit(1)
+        try:
+            self.model = YOLO(self.model_path)
+            self.model_loaded = True
+            print(f"[VISION SERVICE] YOLO model loaded successfully: {self.model_path}")
+            return True
+        except Exception as e:
+            print(f"[VISION SERVICE ERROR] Failed to load YOLO model: {e}")
+            self.model_loaded = False
+            return False
 
-    roi_w = rx2 - rx1
-    roi_h = ry2 - ry1
+    def start(self, loop: Optional[asyncio.AbstractEventLoop] = None):
+        if self.is_running:
+            return
 
-    print("=" * 65)
-    print("JOINTGUARD ROBUST WEBCAM INSPECTION STATE MACHINE")
-    print("=" * 65)
-    print(f"Camera Source:         {args.source}")
-    print(f"Model:                 {model_file} [{model_tag.upper()}]")
-    print(f"Damage Threshold:      {args.damage_thresh:.2f}")
-    print(f"Healthy Threshold:     {args.healthy_thresh:.2f}")
-    print(f"Confidence Margin:     {args.conf_margin:.2f}")
-    print(f"Minimum Sharpness:     {args.min_sharpness:.1f} (Laplacian Variance)")
-    print(f"Target Sharp Frames:   {args.target_frames} (Majority Voting)")
-    print(f"Track Lost Timeout:    1.5s")
-    print(f"Bbox Smooth Alpha:     0.3")
-    print(f"Save Debug Crops:      {args.save_debug_crops}")
-    print(f"JSONL Event Log:       {args.jsonl_log}")
-    print("=" * 65)
+        self._event_loop = loop
+        self.is_running = True
+        self.load_model()
 
-    from ultralytics import YOLO
-    model = YOLO(model_file)
-    print("[INFO] YOLO model loaded successfully.")
-    print("[KEYBOARD SHORTCUTS] 'h'=save healthy crop | 'd'=save damage crop | 'q'=quit")
+        self.thread = threading.Thread(target=self._worker_loop, daemon=True, name="VisionServiceThread")
+        self.thread.start()
+        print(f"[VISION SERVICE] Started calibrated vision thread on camera index {self.camera_index}")
 
-    os.makedirs(COLLECTED_HEALTHY_DIR, exist_ok=True)
-    os.makedirs(COLLECTED_DAMAGE_DIR, exist_ok=True)
+    def stop(self):
+        self.is_running = False
+        if self.thread and self.thread.is_alive():
+            self.thread.join(timeout=2.0)
+        if self.cap and self.cap.isOpened():
+            self.cap.release()
+        self.camera_status = "DISCONNECTED"
+        print("[VISION SERVICE] Stopped vision thread and released camera.")
 
-    tracker = JointGuardStateEngine(
-        target_frames=args.target_frames,
-        min_sharpness=args.min_sharpness,
-        damage_thresh=args.damage_thresh,
-        healthy_thresh=args.healthy_thresh,
-        conf_margin=args.conf_margin,
-        track_lost_timeout=1.5,
-        bbox_smooth_alpha=0.3,
-        jsonl_path=args.jsonl_log,
-        save_debug_crops=args.save_debug_crops,
-        debug_crops_dir=DEBUG_CROPS_DIR,
-    )
+    def _open_camera(self) -> bool:
+        for idx in [self.camera_index, 0 if self.camera_index != 0 else 1]:
+            cap = cv2.VideoCapture(idx)
+            if cap and cap.isOpened():
+                ret, _ = cap.read()
+                if ret:
+                    self.cap = cap
+                    self.camera_status = "CONNECTED"
+                    print(f"[VISION SERVICE] Successfully opened camera index {idx}")
+                    return True
+                cap.release()
+        self.camera_status = "DISCONNECTED"
+        return False
 
-    fps_history = deque(maxlen=30)
-    window_main = "JointGuard YOLO - Robust State Machine Inspection"
-    window_crop = "JointGuard YOLO Input (Smoothed Crop)"
+    def _worker_loop(self):
+        consecutive_failures = 0
 
-    cv2.namedWindow(window_main, cv2.WINDOW_AUTOSIZE)
-    if args.show_crop:
-        cv2.namedWindow(window_crop, cv2.WINDOW_AUTOSIZE)
+        while self.is_running:
+            if self.cap is None or not self.cap.isOpened():
+                if not self._open_camera():
+                    with self._lock:
+                        self.camera_status = "DISCONNECTED"
+                        self.latest_result["camera_status"] = "DISCONNECTED"
+                    time.sleep(3.0)
+                    continue
 
-    try:
-        while True:
-            t_start = time.time()
-            ret, frame = cap.read()
+            ret, frame = self.cap.read()
             if not ret or frame is None:
-                time.sleep(0.01)
+                consecutive_failures += 1
+                if consecutive_failures > 5:
+                    if self.cap:
+                        self.cap.release()
+                    with self._lock:
+                        self.camera_status = "DISCONNECTED"
+                        self.latest_result["camera_status"] = "DISCONNECTED"
+                time.sleep(0.1)
                 continue
 
-            fixed_roi_crop = frame[ry1:ry2, rx1:rx2].copy()
+            consecutive_failures = 0
+            self._process_frame(frame)
+            time.sleep(0.03)
 
-            joint_detected = False
-            actual_bbox_full = None
-            in_inner_zone = False
+    def _process_frame(self, frame: np.ndarray):
+        h, w = frame.shape[:2]
+        x1, y1, x2, y2 = int(0.15 * w), int(0.20 * h), int(0.85 * w), int(0.80 * h)
+        roi_w, roi_h = x2 - x1, y2 - y1
+        roi_img = frame[y1:y2, x1:x2]
 
-            if args.direct_roi:
-                joint_detected = True
-                actual_bbox_full = (rx1, ry1, roi_w, roi_h)
-                in_inner_zone = True
-            else:
-                rel_bbox = find_joint_in_roi(
-                    fixed_roi_crop,
-                    min_area=args.min_joint_area,
-                    min_width=args.min_joint_width,
-                )
+        joint_crop_box = find_joint_in_roi(roi_img)
 
-                if rel_bbox is not None:
-                    jx, jy, jw, jh = rel_bbox
-                    fx, fy = rx1 + jx, ry1 + jy
-                    actual_bbox_full = (fx, fy, jw, jh)
-                    joint_detected = True
-                    in_inner_zone = is_in_inner_inspection_zone(rel_bbox, roi_w, roi_h)
+        raw_bbox_full = None
+        in_inner_zone = False
+        joint_detected = False
 
-            # Process frame through JointGuardStateEngine
-            eval_res = tracker.process_frame(
+        if joint_crop_box is not None:
+            bx, by, bw, bh = joint_crop_box
+            abs_bx1, abs_by1 = x1 + bx, y1 + by
+            raw_bbox_full = (abs_bx1, abs_by1, bw, bh)
+            joint_detected = True
+            in_inner_zone = is_in_inner_inspection_zone(joint_crop_box, roi_w, roi_h)
+
+        if self.model_loaded and self.model is not None:
+            eval_res = self.tracker.process_frame(
                 frame=frame,
                 joint_detected=joint_detected,
-                raw_bbox_full=actual_bbox_full,
+                raw_bbox_full=raw_bbox_full,
                 in_zone=in_inner_zone,
-                yolo_model=model,
-                no_quality_check=args.no_quality_check
+                yolo_model=self.model
             )
+        else:
+            eval_res = {
+                "joint_id": "NONE",
+                "current_label": "MODEL_NOT_LOADED",
+                "p_healthy": 0.0,
+                "p_damage": 0.0,
+                "confidence_margin": 0.0,
+                "sharpness": 0.0,
+                "valid_frame": False,
+                "valid_frame_count": 0,
+                "rejected_blurry_count": self.tracker.rejected_blurry_count,
+                "final_label": "UNCERTAIN",
+                "final_confidence": 0.0,
+                "avg_p_healthy": 0.0,
+                "avg_p_damage": 0.0,
+                "tracking_status": "DISCONNECTED",
+                "inspection_state": "PASSED",
+                "total_frames_seen": 0,
+                "total_frames_lost": 0,
+                "smoothed_bbox": None,
+                "timestamp": datetime.datetime.now().isoformat(),
+                "reason_for_final_change": "model-not-loaded",
+            }
 
-            # Secondary Crop Window
-            if args.show_crop:
-                if eval_res["smoothed_bbox"] is not None:
-                    sx, sy, sw, sh = eval_res["smoothed_bbox"]
-                    fh, fw = frame.shape[:2]
-                    sx = max(0, min(fw - 10, sx))
-                    sy = max(0, min(fh - 10, sy))
-                    sw = max(10, min(fw - sx, sw))
-                    sh = max(10, min(fh - sy, sh))
-                    crop_view = frame[sy:sy+sh, sx:sx+sw].copy()
-                    cv2.putText(
-                        crop_view,
-                        f"YOLO: {eval_res['current_label']}",
-                        (10, 24),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        0.55,
-                        (0, 255, 0) if eval_res['current_label'] == "HEALTHY" else ((0, 0, 255) if eval_res['current_label'] == "DAMAGE" else (0, 200, 255)),
-                        2,
-                    )
-                else:
-                    crop_view = fixed_roi_crop.copy()
-                    cv2.putText(
-                        crop_view,
-                        "SEARCHING...",
-                        (20, crop_view.shape[0] // 2),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        0.7,
-                        (0, 165, 255),
-                        2,
-                    )
-                cv2.imshow(window_crop, crop_view)
+        final_label = eval_res["final_label"]
+        final_conf = eval_res["final_confidence"]
+        vision_score: Optional[float] = None
 
-            # RENDER HUD DEBUG OVERLAY ON MAIN DISPLAY
-            t_now = time.time()
-            fps_history.append(1.0 / max(1e-5, t_now - t_start))
-            current_fps = float(np.mean(fps_history))
+        if final_label == "HEALTHY":
+            vision_score = round(final_conf * 100.0, 2)
+        elif final_label == "DAMAGE":
+            vision_score = round((1.0 - final_conf) * 100.0, 2)
 
-            display_frame = frame.copy()
+        res = {
+            "type": "vision_update",
+            "joint_id": eval_res["joint_id"],
+            "label": final_label,
+            "confidence": round(final_conf, 4),
+            "vision_score": vision_score,
+            "current_label": eval_res["current_label"],
+            "p_healthy": round(eval_res["p_healthy"], 4),
+            "p_damage": round(eval_res["p_damage"], 4),
+            "sharpness": round(eval_res["sharpness"], 2),
+            "valid_frame_count": eval_res["valid_frame_count"],
+            "rejected_blurry_count": eval_res["rejected_blurry_count"],
+            "tracking_status": eval_res["tracking_status"],
+            "inspection_state": eval_res["inspection_state"],
+            "camera_status": "CONNECTED",
+            "model_status": "LOADED" if self.model_loaded else "NOT_LOADED",
+            "timestamp": eval_res["timestamp"],
+        }
 
-            # Outer ROI rectangle
-            cv2.rectangle(display_frame, (rx1, ry1), (rx2, ry2), (255, 180, 0), 1)
-            cv2.putText(display_frame, "SEARCH ROI", (rx1 + 5, ry1 - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 180, 0), 1)
+        # Trigger alert on high-confidence damage detection
+        if final_label == "DAMAGE" and final_conf >= self.damage_thresh:
+            try:
+                from backend.database.db import SessionLocal
+                from backend.services.alert_service import trigger_vision_damage_alert
+                db = SessionLocal()
+                try:
+                    trigger_vision_damage_alert(db, eval_res["joint_id"], final_conf, vision_score or 8.0)
+                finally:
+                    db.close()
+            except Exception:
+                pass
 
-            # Inner Inspection Zone rectangle
-            iz_x1 = rx1 + int(roi_w * 0.08)
-            iz_y1 = ry1 + int(roi_h * 0.10)
-            iz_x2 = rx1 + int(roi_w * 0.92)
-            iz_y2 = ry1 + int(roi_h * 0.90)
-            cv2.rectangle(display_frame, (iz_x1, iz_y1), (iz_x2, iz_y2), (0, 255, 255), 1)
-            cv2.putText(display_frame, "INNER INSPECTION ZONE", (iz_x1 + 5, iz_y1 + 15), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 255), 1)
+        # HUD Overlays on video frame for MJPEG stream
+        vis_frame = frame.copy()
+        cv2.rectangle(vis_frame, (x1, y1), (x2, y2), (255, 180, 0), 1)
 
-            # Draw Smoothed Bounding Box on localized joint
-            if eval_res["smoothed_bbox"] is not None:
-                bx, by, bw, bh = eval_res["smoothed_bbox"]
-                f_lbl = eval_res["final_label"]
-                color = (0, 220, 0) if f_lbl == "HEALTHY" else ((0, 0, 230) if f_lbl == "DAMAGE" else (0, 200, 255))
+        iz_x1 = x1 + int(roi_w * 0.08)
+        iz_y1 = y1 + int(roi_h * 0.10)
+        iz_x2 = x1 + int(roi_w * 0.92)
+        iz_y2 = y1 + int(roi_h * 0.90)
+        cv2.rectangle(vis_frame, (iz_x1, iz_y1), (iz_x2, iz_y2), (0, 255, 255), 1)
 
-                cv2.rectangle(display_frame, (bx, by), (bx + bw, by + bh), color, 2)
+        if eval_res["smoothed_bbox"] is not None:
+            bx, by, bw, bh = eval_res["smoothed_bbox"]
+            color = (0, 255, 0) if final_label == "HEALTHY" else ((0, 0, 255) if final_label == "DAMAGE" else (0, 165, 255))
+            cv2.rectangle(vis_frame, (bx, by), (bx + bw, by + bh), color, 2)
+            txt = f"{eval_res['joint_id']}: {final_label} {final_conf*100:.1f}%" if final_conf > 0 else f"{eval_res['joint_id']}: {final_label}"
+            cv2.putText(vis_frame, txt, (bx, max(15, by - 8)), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
 
-                badge_txt = f"{eval_res['joint_id']}: {f_lbl}"
-                if eval_res["final_confidence"] > 0:
-                    badge_txt += f" ({eval_res['final_confidence']*100:.1f}%)"
-                if eval_res["tracking_status"] == "TEMPORARILY_LOST":
-                    badge_txt += " [LOST]"
+        # Top Diagnostic HUD Box
+        hud_w, hud_h = 440, 140
+        cv2.rectangle(vis_frame, (10, 10), (10 + hud_w, 10 + hud_h), (15, 23, 42), -1)
+        cv2.rectangle(vis_frame, (10, 10), (10 + hud_w, 10 + hud_h), (51, 65, 85), 1)
 
-                cv2.rectangle(display_frame, (bx, max(0, by - 22)), (bx + 260, max(22, by)), (20, 20, 20), -1)
-                cv2.putText(display_frame, badge_txt, (bx + 5, max(14, by - 6)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
+        cv2.putText(vis_frame, f"JOINT: {eval_res['joint_id']} | Final: {final_label}", (20, 32), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (248, 250, 252), 2)
+        hp_pct = eval_res['p_healthy'] * 100.0
+        dp_pct = eval_res['p_damage'] * 100.0
+        cv2.putText(vis_frame, f"Current: {eval_res['current_label']} (H: {hp_pct:.1f}% | D: {dp_pct:.1f}%)", (20, 56), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (56, 189, 248), 1)
+        sharp_col = (74, 222, 128) if eval_res['sharpness'] >= self.min_sharpness else (248, 113, 113)
+        cv2.putText(vis_frame, f"Sharpness: {eval_res['sharpness']:.1f} (Min: {self.min_sharpness:.1f})", (20, 78), cv2.FONT_HERSHEY_SIMPLEX, 0.45, sharp_col, 1)
+        cv2.putText(vis_frame, f"Valid: {eval_res['valid_frame_count']}/{self.target_frames} | Rejected: {eval_res['rejected_blurry_count']}", (20, 100), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (251, 191, 36), 1)
 
-            # TOP DIAGNOSTIC HUD BOX (REQUIREMENT 12)
-            hud_bg_w = 480
-            hud_bg_h = 170
-            cv2.rectangle(display_frame, (10, 10), (10 + hud_bg_w, 10 + hud_bg_h), (15, 23, 42), -1)
-            cv2.rectangle(display_frame, (10, 10), (10 + hud_bg_w, 10 + hud_bg_h), (51, 65, 85), 1)
+        _, jpeg_buf = cv2.imencode(".jpg", vis_frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
+        jpeg_bytes = jpeg_buf.tobytes()
 
-            # Line 1: Joint ID, State & FPS
-            cv2.putText(display_frame, f"JOINT: {eval_res['joint_id']}  |  STATE: {eval_res['inspection_state']}  |  FPS: {current_fps:.1f}",
-                        (20, 32), cv2.FONT_HERSHEY_SIMPLEX, 0.52, (248, 250, 252), 2)
+        with self._lock:
+            self.latest_result = res
+            self.latest_frame_jpeg = jpeg_bytes
+            self.camera_status = "CONNECTED"
 
-            # Line 2: CURRENT Prediction
-            hp_pct = eval_res['p_healthy'] * 100.0
-            dp_pct = eval_res['p_damage'] * 100.0
-            cv2.putText(display_frame, f"CURRENT: {eval_res['current_label']} (H: {hp_pct:.1f}% | D: {dp_pct:.1f}%)",
-                        (20, 56), cv2.FONT_HERSHEY_SIMPLEX, 0.48, (56, 189, 248), 1)
+        self._notify_subscribers(res)
 
-            # Line 3: FINAL Confirmed Result & Status
-            final_lbl = eval_res['final_label']
-            final_conf_pct = eval_res['final_confidence'] * 100.0
-            final_col = (74, 222, 128) if final_lbl == "HEALTHY" else ((248, 113, 113) if final_lbl == "DAMAGE" else (251, 191, 36))
-            status_txt = "VISUALIZED" if eval_res['tracking_status'] == "VISUALIZED" else ("TEMPORARILY NOT VISIBLE" if eval_res['tracking_status'] == "TEMPORARILY_LOST" else "SEARCHING")
-            cv2.putText(display_frame, f"FINAL: {final_lbl} ({final_conf_pct:.1f}%)  |  STATUS: {status_txt}",
-                        (20, 82), cv2.FONT_HERSHEY_SIMPLEX, 0.52, final_col, 2)
+    def _notify_subscribers(self, data: Dict[str, Any]):
+        if self._event_loop and self._event_loop.is_running():
+            try:
+                from backend.websocket.telemetry_ws import telemetry_ws
+                asyncio.run_coroutine_threadsafe(
+                    telemetry_ws.broadcast(data),
+                    self._event_loop
+                )
+            except Exception:
+                pass
 
-            # Line 4: Track Stats (Seen / Lost)
-            cv2.putText(display_frame, f"TRACK: {eval_res['joint_id']}  |  Seen: {eval_res['total_frames_seen']} frames  |  Lost: {eval_res['total_frames_lost']} frames",
-                        (20, 108), cv2.FONT_HERSHEY_SIMPLEX, 0.46, (251, 191, 36), 1)
+    def get_latest_result(self) -> Dict[str, Any]:
+        with self._lock:
+            return dict(self.latest_result)
 
-            # Line 5: Temporal Buffer & Average Confidences
-            avg_h_pct = eval_res['avg_p_healthy'] * 100.0
-            avg_d_pct = eval_res['avg_p_damage'] * 100.0
-            cv2.putText(display_frame, f"TEMPORAL: {eval_res['valid_frame_count']}/{args.target_frames} valid  |  Avg D: {avg_d_pct:.1f}%  |  Avg H: {avg_h_pct:.1f}%",
-                        (20, 132), cv2.FONT_HERSHEY_SIMPLEX, 0.46, (203, 213, 225), 1)
-
-            # Line 6: Sharpness Score
-            sharp_val = eval_res['sharpness']
-            sharp_col = (74, 222, 128) if sharp_val >= args.min_sharpness else (248, 113, 113)
-            cv2.putText(display_frame, f"SHARPNESS: {sharp_val:.1f} (Min: {args.min_sharpness:.1f})",
-                        (20, 156), cv2.FONT_HERSHEY_SIMPLEX, 0.46, sharp_col, 1)
-
-            cv2.imshow(window_main, display_frame)
-
-            key = cv2.waitKey(1) & 0xFF
-            if key == ord('q') or key == 27:
-                print("[INFO] Quitting webcam inspection...")
-                break
-
-    finally:
-        tracker.print_diagnostic_summary()
-        cap.release()
-        cv2.destroyAllWindows()
+    def get_latest_jpeg(self) -> Optional[bytes]:
+        with self._lock:
+            return self.latest_frame_jpeg
 
 
-if __name__ == "__main__":
-    main()
+vision_service = VisionService()

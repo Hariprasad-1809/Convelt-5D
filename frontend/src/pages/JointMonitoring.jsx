@@ -107,16 +107,17 @@ function InspectModal({ joint, onClose }) {
           {/* Vision */}
           <div className="card-elevated" style={{ textAlign: 'center' }}>
             <div style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)', marginBottom: 6, textTransform: 'uppercase', letterSpacing: '0.07em' }}>
-              Vision Score (Simulated)
+              Vision · YOLOv8 Classifier
             </div>
-            <div style={{ fontSize: 'var(--text-2xl)', fontFamily: 'var(--font-mono)', fontWeight: 700, color: 'var(--accent)' }}>
-              {joint.vision_score != null ? joint.vision_score.toFixed(0) : '85'}
+            <div style={{ fontSize: 'var(--text-2xl)', fontFamily: 'var(--font-mono)', fontWeight: 700, color: joint.vision_score != null ? (joint.vision_score >= 70 ? 'var(--status-normal)' : 'var(--status-high)') : 'var(--text-muted)' }}>
+              {joint.vision_score != null ? Math.round(joint.vision_score) : 'N/A'}
               <span style={{ fontSize: 'var(--text-sm)', color: 'var(--text-muted)', fontWeight: 400 }}> / 100</span>
             </div>
-            <div style={{ marginTop: 6, fontSize: '11px', color: 'var(--accent)' }}>
-              Phase 1 Injected
+            <div style={{ marginTop: 6, fontSize: '11px', fontWeight: 600, color: joint.vision_label === 'DAMAGE' ? 'var(--status-high)' : 'var(--status-normal)' }}>
+              {joint.vision_label || (joint.vision_score != null ? (joint.vision_score >= 70 ? 'HEALTHY' : 'DAMAGE') : 'LIVE YOLO')}
             </div>
           </div>
+
         </div>
       </div>
 

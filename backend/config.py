@@ -60,15 +60,29 @@ class Settings(BaseSettings):
     SERIAL_RECONNECT_INTERVAL_SECONDS: float = 3.0
 
     # --------------------------------------------------------------------------
+    # VISION & YOLO CAMERA CONFIGURATION
+    # --------------------------------------------------------------------------
+    VISION_CAMERA_INDEX: int = int(os.getenv("VISION_CAMERA_INDEX", "1"))
+    VISION_MODEL_PATH: str = os.getenv(
+        "VISION_MODEL_PATH",
+        os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "check_yolo", "models", "joint_yolo_classifier_v4.pt"))
+    )
+    VISION_CONF_THRESH: float = float(os.getenv("VISION_CONF_THRESH", "0.60"))
+    VISION_ROI: str = os.getenv("VISION_ROI", "0.15,0.20,0.85,0.80")
+    VISION_INFER_INTERVAL: int = int(os.getenv("VISION_INFER_INTERVAL", "2"))
+    VISION_HISTORY_LEN: int = int(os.getenv("VISION_HISTORY_LEN", "5"))
+
+    # --------------------------------------------------------------------------
     # SYSTEM DISCLAIMERS & LABELS
     # --------------------------------------------------------------------------
     SCORING_TYPE: str = "RULE_BASED_WEIGHTED_FUSION"
     HALL_SENSOR_TYPE: str = "A3144_DEMO_MAGNETIC_EVENT"
-    VISION_MODE: str = "SIMULATED_OR_MANUAL"
+    VISION_MODE: str = "YOLO_V8_LIVE_WEBCAM"
 
     class Config:
         env_file = ".env"
         extra = "ignore"
 
 settings = Settings()
+
 

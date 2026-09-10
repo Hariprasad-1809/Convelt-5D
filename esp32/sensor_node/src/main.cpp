@@ -41,11 +41,11 @@ void checkButtons(bool temperatureHigh, bool vibrationHigh);
 // MOTOR SETTINGS
 // =====================================================
 
-int motorSpeedPercent = 30;
+int motorSpeedPercent = 20;
 
 #define SPEED_STEP 10
 
-bool motorRunning = false;
+bool motorRunning = true;
 
 // =====================================================
 // SENSOR OBJECTS
@@ -89,12 +89,12 @@ void setup()
   pinMode(STOP_BUTTON, INPUT_PULLUP);
 
   // ---------------------------------------------------
-  // MOTOR
+  // MOTOR (AUTO-START AT 20% SPEED)
   // ---------------------------------------------------
 
   pinMode(MOTOR_PWM_PIN, OUTPUT);
 
-  analogWrite(MOTOR_PWM_PIN, 0);
+  setMotorSpeed();
 
   // ---------------------------------------------------
   // TEMPERATURE SENSOR
@@ -296,32 +296,24 @@ void loop()
     vibration >= VIBRATION_HIGH_LIMIT;
 
   // ===================================================
-  // SAFETY STOP
+  // SENSOR WARNING LOGGING (CONTINUOUS MOTOR RUNNING)
   // ===================================================
 
   if (temperatureHigh || vibrationHigh)
   {
-    if (motorRunning)
+    Serial.println();
+    Serial.println("!!! SENSOR WARNING !!!");
+
+    if (temperatureHigh)
     {
-      Serial.println();
-      Serial.println("!!! SAFETY STOP !!!");
-
-      if (temperatureHigh)
-      {
-        Serial.println("Temperature = DANGER");
-      }
-
-      if (vibrationHigh)
-      {
-        Serial.println("Vibration = DANGER");
-      }
-
-      Serial.println("Motor STOPPED");
+      Serial.println("Temperature = DANGER");
     }
 
-    motorRunning = false;
-
-    analogWrite(MOTOR_PWM_PIN, 0);
+    if (vibrationHigh)
+    {
+      Serial.println("Vibration = DANGER");
+    }
+    // Motor remains running continuously as requested
   }
 
   // ===================================================
@@ -449,38 +441,15 @@ void checkButtons(
     Serial.println();
     Serial.println("START BUTTON PRESSED");
 
-    // Start only if sensors are safe
+    motorRunning = true;
 
-    if (
-      !temperatureHigh &&
-      !vibrationHigh
-    )
-    {
-      motorRunning = true;
+    Serial.println("Motor STARTED");
+    Serial.print("Speed: ");
+    Serial.print(motorSpeedPercent);
+    Serial.println("%");
 
-      Serial.println("Motor STARTED");
-      Serial.print("Speed: ");
-      Serial.print(motorSpeedPercent);
-      Serial.println("%");
-
-      setMotorSpeed();
-    }
-    else
-    {
-      Serial.println("Motor CANNOT START");
-
-      if (temperatureHigh)
-      {
-        Serial.println("Temperature is DANGER");
-      }
-
-      if (vibrationHigh)
-      {
-        Serial.println("Vibration is DANGER");
-      }
-    }
-
-    delay(250);
+    setMotorSpeed();
+    delay(200);
   }
 
   // ===================================================

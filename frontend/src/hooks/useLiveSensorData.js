@@ -13,7 +13,8 @@
 import { useSimulation } from '../context/SimulationContext';
 
 export function useLiveSensorData() {
-  const { joints, lastUpdated, updateCount, hardwareStatus, wsStatus, apiConnected } = useSimulation();
-  return { joints, lastUpdated, updateCount, hardwareStatus, wsStatus, apiConnected };
+  const { joints, lastUpdated, updateCount, hardwareStatus, wsStatus, apiConnected, visionData, cameraStatus } = useSimulation();
+  return { joints, lastUpdated, updateCount, hardwareStatus, wsStatus, apiConnected, visionData, cameraStatus };
 }
+
 

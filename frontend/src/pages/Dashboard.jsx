@@ -17,6 +17,7 @@ import SensorChart from '../components/ui/SensorChart';
 import AlertBanner from '../components/dashboard/AlertBanner';
 import SimulationControls from '../components/dashboard/SimulationControls';
 import Modal from '../components/ui/Modal';
+import CameraVision from '../components/ui/CameraVision';
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -78,21 +79,21 @@ function JointQuickModal({ jointId, joints, onClose, onInspect }) {
             <div style={{ fontSize: '9px', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.07em', marginBottom: 4 }}>
               Temp · DS18B20 (10%)
             </div>
-            <div style={{ fontSize: 'var(--text-lg)', fontFamily: 'var(--font-mono)', fontWeight: 700, color: 'var(--text-primary)', marginBottom: 4 }}>
-              {joint.temperature?.toFixed(1)}°C
+            <div style={{ fontSize: 'var(--text-lg)', fontFamily: 'var(--font-mono)', fontWeight: 700, color: 'var(--text-primary)' }}>
+              {joint.temperature.toFixed(1)}°C
             </div>
-            <StatusBadge status={tempSt} size="sm" />
+            <div style={{ marginTop: 4 }}><StatusBadge status={tempSt} size="sm" /></div>
           </div>
 
-          {/* Acceleration / Vibration */}
+          {/* Acceleration */}
           <div style={{ padding: '10px', background: 'var(--bg-elevated)', borderRadius: 'var(--radius)', textAlign: 'center' }}>
             <div style={{ fontSize: '9px', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.07em', marginBottom: 4 }}>
               Accel · MPU6050 (20%)
             </div>
-            <div style={{ fontSize: 'var(--text-lg)', fontFamily: 'var(--font-mono)', fontWeight: 700, color: 'var(--text-primary)', marginBottom: 4 }}>
-              {joint.vibration?.toFixed(2)} m/s²
+            <div style={{ fontSize: 'var(--text-lg)', fontFamily: 'var(--font-mono)', fontWeight: 700, color: 'var(--text-primary)' }}>
+              {joint.vibration.toFixed(2)} m/s²
             </div>
-            <StatusBadge status={accelSt} size="sm" />
+            <div style={{ marginTop: 4 }}><StatusBadge status={accelSt} size="sm" /></div>
           </div>
 
           {/* Magnetic / Hall */}
@@ -100,33 +101,9 @@ function JointQuickModal({ jointId, joints, onClose, onInspect }) {
             <div style={{ fontSize: '9px', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.07em', marginBottom: 4 }}>
               Magnetic · A3144 (30%)
             </div>
-            <div style={{ fontSize: 'var(--text-lg)', fontFamily: 'var(--font-mono)', fontWeight: 700, color: joint.hall_event ? 'var(--accent)' : 'var(--text-secondary)', marginBottom: 4 }}>
+            <div style={{ fontSize: 'var(--text-base)', fontFamily: 'var(--font-mono)', fontWeight: 700, color: joint.hall_event ? 'var(--accent)' : 'var(--text-secondary)' }}>
               {joint.hall_event ? 'PULSE' : 'IDLE'}
             </div>
-            <span style={{ fontSize: '9px', color: 'var(--text-muted)' }}>Marker Event</span>
-          </div>
-
-          {/* Vision Score */}
-          <div style={{ padding: '10px', background: 'var(--bg-elevated)', borderRadius: 'var(--radius)', textAlign: 'center' }}>
-            <div style={{ fontSize: '9px', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.07em', marginBottom: 4 }}>
-              Vision Score (40%)
-            </div>
-            <div style={{ fontSize: 'var(--text-lg)', fontFamily: 'var(--font-mono)', fontWeight: 700, color: 'var(--accent)', marginBottom: 4 }}>
-              {joint.vision_score != null ? `${joint.vision_score.toFixed(0)}/100` : '85/100'}
-            </div>
-            <span style={{ fontSize: '9px', color: 'var(--accent)' }}>Simulated / Injected</span>
-          </div>
-        </div>
-
-        {/* Condition score */}
-        <div style={{ padding: '12px', background: 'var(--bg-elevated)', borderRadius: 'var(--radius)' }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
-            <span style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.06em' }}>
-              Weighted Fusion Health Score
-            </span>
-            <span style={{ fontFamily: 'var(--font-mono)', fontWeight: 700, color: sc }}>{score} / 100</span>
-          </div>
-          <div style={{ height: 4, background: 'var(--bg-overlay)', borderRadius: 2, overflow: 'hidden' }}>
             <div style={{ height: '100%', width: `${score}%`, background: sc, borderRadius: 2 }} />
           </div>
           <div style={{ fontSize: '10px', color: 'var(--text-muted)', marginTop: 6 }}>

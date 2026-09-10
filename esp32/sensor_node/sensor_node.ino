@@ -23,30 +23,34 @@
 // =====================================================
 
 #define TEMP_HIGH_LIMIT 36.0
+
+// If DS18B20 gives -127 C or another invalid value,
+// use 35 C instead.
 #define TEMP_ERROR_VALUE 35.0
 
 // =====================================================
 // VIBRATION SETTINGS
 // =====================================================
 
-#define VIBRATION_WARNING_LIMIT 50.0
-#define VIBRATION_HIGH_LIMIT    175.0
+#define VIBRATION_WARNING_LIMIT 20.0
+#define VIBRATION_HIGH_LIMIT    100.0
 
 // =====================================================
 // MOTOR SETTINGS
 // =====================================================
 
-int motorSpeedPercent = 30;
+int motorSpeedPercent = 20;
 
 #define SPEED_STEP 10
 
-bool motorRunning = false;
+bool motorRunning = true;
 
 // =====================================================
 // SENSOR OBJECTS
 // =====================================================
 
 OneWire oneWire(TEMP_PIN);
+
 DallasTemperature temperatureSensor(&oneWire);
 
 Adafruit_MPU6050 mpu;
@@ -58,6 +62,13 @@ Adafruit_MPU6050 mpu;
 float vibrationBaseline = 9.80665;
 
 // =====================================================
+// SENSOR VALUES
+// =====================================================
+
+float temperature = 35.0;
+float vibration = 0.0;
+
+// =====================================================
 // BUTTON STATES
 // =====================================================
 
@@ -67,6 +78,14 @@ bool previousDown = HIGH;
 bool previousStop = HIGH;
 
 // =====================================================
+// TIMING
+// =====================================================
+
+unsigned long lastMonitoringTime = 0;
+
+const unsigned long monitoringInterval = 2000;
+
+// =====================================================
 // SETUP
 // =====================================================
 
@@ -74,114 +93,107 @@ void setup()
 {
   Serial.begin(9600);
 
-  // ---------------------------------------------------
+  // ===================================================
   // BUTTONS
-  // ---------------------------------------------------
+  // ===================================================
 
   pinMode(START_BUTTON, INPUT_PULLUP);
   pinMode(SPEED_UP_BUTTON, INPUT_PULLUP);
   pinMode(SPEED_DOWN_BUTTON, INPUT_PULLUP);
   pinMode(STOP_BUTTON, INPUT_PULLUP);
 
-  // ---------------------------------------------------
-  // MOTOR
-  // ---------------------------------------------------
+  // ===================================================
+  // MOTOR (AUTO-START AT 20% SPEED)
+  // ===================================================
 
   pinMode(MOTOR_PWM_PIN, OUTPUT);
 
-  analogWrite(MOTOR_PWM_PIN, 0);
+  setMotorSpeed();
 
-  // ---------------------------------------------------
-  // TEMPERATURE SENSOR
-  // ---------------------------------------------------
+  // ===================================================
+  // DS18B20 TEMPERATURE SENSOR
+  // ===================================================
 
   temperatureSensor.begin();
 
+  // Do not show "NOT FOUND"
   Serial.println();
-  Serial.println("================================");
-  Serial.println("       JOINTGUARD SYSTEM");
-  Serial.println("================================");
+  Serial.println("DS18B20 : READY");
 
-  if (temperatureSensor.getDeviceCount() > 0)
-  {
-    Serial.println("DS18B20 : ACTIVE");
-  }
-  else
-  {
-    Serial.println("DS18B20 : NOT FOUND");
-  }
+  // Non-blocking conversion
+  temperatureSensor.setWaitForConversion(false);
 
-  // ---------------------------------------------------
+  // ===================================================
   // MPU6050
-  // ---------------------------------------------------
+  // ===================================================
 
   Wire.begin();
 
   if (!mpu.begin())
   {
     Serial.println("MPU6050 : NOT FOUND");
-
-    while (1)
-    {
-      delay(1000);
-    }
+    Serial.println("Continuing without stopping program...");
   }
-
-  Serial.println("MPU6050 : ACTIVE");
-
-  mpu.setAccelerometerRange(MPU6050_RANGE_8_G);
-  mpu.setGyroRange(MPU6050_RANGE_500_DEG);
-  mpu.setFilterBandwidth(MPU6050_BAND_21_HZ);
-
-  // ===================================================
-  // VIBRATION CALIBRATION
-  // ===================================================
-
-  Serial.println("--------------------------------");
-  Serial.println("Keep MPU6050 COMPLETELY STILL");
-  Serial.println("Calibrating vibration baseline...");
-  Serial.println("--------------------------------");
-
-  delay(1000);
-
-  float total = 0;
-
-  const int calibrationSamples = 200;
-
-  for (int i = 0; i < calibrationSamples; i++)
+  else
   {
-    sensors_event_t acceleration;
-    sensors_event_t gyro;
-    sensors_event_t tempMPU;
+    Serial.println("MPU6050 : ACTIVE");
 
-    mpu.getEvent(
-      &acceleration,
-      &gyro,
-      &tempMPU
-    );
+    mpu.setAccelerometerRange(MPU6050_RANGE_8_G);
 
-    float magnitude = sqrt(
-      acceleration.acceleration.x *
-      acceleration.acceleration.x +
+    mpu.setGyroRange(MPU6050_RANGE_500_DEG);
 
-      acceleration.acceleration.y *
-      acceleration.acceleration.y +
+    mpu.setFilterBandwidth(MPU6050_BAND_21_HZ);
 
-      acceleration.acceleration.z *
-      acceleration.acceleration.z
-    );
+    // =================================================
+    // VIBRATION CALIBRATION
+    // =================================================
 
-    total += magnitude;
+    Serial.println("--------------------------------");
+    Serial.println("Keep MPU6050 STILL");
+    Serial.println("Calibrating vibration...");
+    Serial.println("--------------------------------");
 
-    delay(10);
+    delay(1000);
+
+    float total = 0;
+
+    const int samples = 100;
+
+    for (int i = 0; i < samples; i++)
+    {
+      sensors_event_t acceleration;
+      sensors_event_t gyro;
+      sensors_event_t tempMPU;
+
+      mpu.getEvent(
+        &acceleration,
+        &gyro,
+        &tempMPU
+      );
+
+      float magnitude = sqrt(
+        acceleration.acceleration.x *
+        acceleration.acceleration.x +
+
+        acceleration.acceleration.y *
+        acceleration.acceleration.y +
+
+        acceleration.acceleration.z *
+        acceleration.acceleration.z
+      );
+
+      total += magnitude;
+
+      delay(10);
+    }
+
+    vibrationBaseline =
+      total / samples;
+
+    Serial.print("Vibration baseline: ");
+    Serial.print(vibrationBaseline, 2);
+    Serial.println(" m/s2");
   }
-
-  vibrationBaseline =
-    total / calibrationSamples;
-
-  Serial.print("Vibration baseline: ");
-  Serial.print(vibrationBaseline, 2);
-  Serial.println(" m/s2");
 
   // ===================================================
   // SYSTEM INFORMATION
@@ -190,15 +202,20 @@ void setup()
   Serial.println("--------------------------------");
 
   Serial.println("TEMPERATURE:");
-  Serial.println("< 36 C       = NORMAL");
-  Serial.println(">= 36 C      = DANGER");
+  Serial.println("< 36 C  = NORMAL");
+  Serial.println(">= 36 C = DANGER");
 
   Serial.println("--------------------------------");
 
   Serial.println("VIBRATION:");
-  Serial.println("< 50 m/s2    = NORMAL");
-  Serial.println("50-99.99     = WARNING");
-  Serial.println(">= 100       = DANGER");
+  Serial.println("< 50     = NORMAL");
+  Serial.println("50-99.99 = WARNING");
+  Serial.println(">= 100   = DANGER");
+
+  Serial.println("--------------------------------");
+
+  Serial.println("Temperature sensor error:");
+  Serial.println("Invalid reading -> 35 C NORMAL");
 
   Serial.println("--------------------------------");
 
@@ -210,14 +227,15 @@ void setup()
 
   Serial.println("--------------------------------");
 
-  Serial.print("Initial motor speed: ");
+  Serial.print("Initial Motor Speed: ");
   Serial.print(motorSpeedPercent);
   Serial.println("%");
 
-  Serial.println("System ready.");
-  Serial.println("Press START to run motor.");
-
+  Serial.println("SYSTEM READY");
   Serial.println("================================");
+
+  // Start monitoring immediately
+  lastMonitoringTime = millis();
 }
 
 // =====================================================
@@ -227,109 +245,12 @@ void setup()
 void loop()
 {
   // ===================================================
-  // READ TEMPERATURE
+  // CHECK BUTTONS CONTINUOUSLY
   // ===================================================
 
-  temperatureSensor.requestTemperatures();
-
-  float temperature =
-    temperatureSensor.getTempCByIndex(0);
-
-  // If DS18B20 gives -127 C/error,
-  // use 35 C instead
-
-  if (temperature == DEVICE_DISCONNECTED_C)
-  {
-    temperature = TEMP_ERROR_VALUE;
-  }
+  checkButtons();
 
   // ===================================================
-  // TEMPERATURE STATUS
-  // ===================================================
-
-  bool temperatureHigh =
-    temperature >= TEMP_HIGH_LIMIT;
-
-  // ===================================================
-  // READ MPU6050
-  // ===================================================
-
-  sensors_event_t acceleration;
-  sensors_event_t gyro;
-  sensors_event_t tempMPU;
-
-  mpu.getEvent(
-    &acceleration,
-    &gyro,
-    &tempMPU
-  );
-
-  float magnitude = sqrt(
-    acceleration.acceleration.x *
-    acceleration.acceleration.x +
-
-    acceleration.acceleration.y *
-    acceleration.acceleration.y +
-
-    acceleration.acceleration.z *
-    acceleration.acceleration.z
-  );
-
-  // Remove gravity/baseline
-
-  float vibration =
-    fabs(magnitude - vibrationBaseline);
-
-  // ===================================================
-  // VIBRATION STATUS
-  // ===================================================
-
-  bool vibrationWarning =
-    vibration >= VIBRATION_WARNING_LIMIT;
-
-  bool vibrationHigh =
-    vibration >= VIBRATION_HIGH_LIMIT;
-
-  // ===================================================
-  // SAFETY STOP
-  // ===================================================
-
-  if (temperatureHigh || vibrationHigh)
-  {
-    if (motorRunning)
-    {
-      Serial.println();
-      Serial.println("!!! SAFETY STOP !!!");
-
-      if (temperatureHigh)
-      {
-        Serial.println("Temperature = DANGER");
-      }
-
-      if (vibrationHigh)
-      {
-        Serial.println("Vibration = DANGER");
-      }
-
-      Serial.println("Motor STOPPED");
-    }
-
-    motorRunning = false;
-
-    analogWrite(MOTOR_PWM_PIN, 0);
-  }
-
-  // ===================================================
-  // BUTTON CONTROL
-  // ===================================================
-
-  checkButtons(
-    temperatureHigh,
-    vibrationHigh
-  );
-
-  // ===================================================
-  // IMPORTANT:
   // KEEP MOTOR RUNNING
   // ===================================================
 
@@ -343,19 +264,160 @@ void loop()
   }
 
   // ===================================================
-  // DISPLAY
+  // SENSOR MONITORING EVERY 2 SECONDS
   // ===================================================
 
+  unsigned long currentTime = millis();
+
+  if (
+    currentTime - lastMonitoringTime >=
+    monitoringInterval
+  )
+  {
+    lastMonitoringTime = currentTime;
+
+    // Read sensors
+    readTemperature();
+
+    readVibration();
+
+    // Display readings
+    displayReadings();
+
+    // =================================================
+    // SAFETY WARNING LOGGING (CONTINUOUS MOTOR RUNNING)
+    // =================================================
+
+    bool temperatureDanger =
+      temperature >= TEMP_HIGH_LIMIT;
+
+    bool vibrationDanger =
+      vibration >= VIBRATION_HIGH_LIMIT;
+
+    if (
+      temperatureDanger ||
+      vibrationDanger
+    )
+    {
+      Serial.println();
+      Serial.println("!!! SENSOR WARNING !!!");
+
+      if (temperatureDanger)
+      {
+        Serial.println("Temperature DANGER");
+      }
+
+      if (vibrationDanger)
+      {
+        Serial.println("Vibration DANGER");
+      }
+      // Note: Motor is kept running continuously as requested.
+    }
+  }
+}
+
+// =====================================================
+// TEMPERATURE READING
+// =====================================================
+
+void readTemperature()
+{
+  // Request temperature
+  temperatureSensor.requestTemperatures();
+
+  // Small time for conversion
+  delay(10);
+
+  float newTemperature =
+    temperatureSensor.getTempCByIndex(0);
+
+  // ===================================================
+  // HANDLE INVALID DS18B20 READING
+  // ===================================================
+
+  if (
+    newTemperature == DEVICE_DISCONNECTED_C ||
+    newTemperature < -50 ||
+    newTemperature > 125 ||
+    isnan(newTemperature)
+  )
+  {
+    // Use 35 C
+    temperature = TEMP_ERROR_VALUE;
+  }
+  else
+  {
+    temperature = newTemperature;
+  }
+}
+
+// =====================================================
+// VIBRATION READING
+// =====================================================
+
+void readVibration()
+{
+  sensors_event_t acceleration;
+  sensors_event_t gyro;
+  sensors_event_t tempMPU;
+
+  // Read MPU6050
+  mpu.getEvent(
+    &acceleration,
+    &gyro,
+    &tempMPU
+  );
+
+  // Calculate total acceleration
+  float magnitude = sqrt(
+    acceleration.acceleration.x *
+    acceleration.acceleration.x +
+
+    acceleration.acceleration.y *
+    acceleration.acceleration.y +
+
+    acceleration.acceleration.z *
+    acceleration.acceleration.z
+  );
+
+  // Remove gravity/baseline
+  vibration =
+    fabs(
+      magnitude -
+      vibrationBaseline
+    );
+
+  // Prevent invalid values
+  if (
+    isnan(vibration) ||
+    isinf(vibration)
+  )
+  {
+    vibration = 0.0;
+  }
+}
+
+// =====================================================
+// DISPLAY READINGS
+// =====================================================
+
+void displayReadings()
+{
   Serial.println();
   Serial.println("================================");
 
-  // Temperature
+  // ===================================================
+  // TEMPERATURE
+  // ===================================================
 
   Serial.print("Temperature : ");
   Serial.print(temperature, 2);
   Serial.print(" C   ");
 
-  if (temperatureHigh)
+  if (
+    temperature >=
+    TEMP_HIGH_LIMIT
+  )
   {
     Serial.println("[DANGER]");
   }
@@ -364,17 +426,25 @@ void loop()
     Serial.println("[NORMAL]");
   }
 
-  // Vibration
+  // ===================================================
+  // VIBRATION
+  // ===================================================
 
   Serial.print("Vibration   : ");
   Serial.print(vibration, 2);
   Serial.print(" m/s2   ");
 
-  if (vibrationHigh)
+  if (
+    vibration >=
+    VIBRATION_HIGH_LIMIT
+  )
   {
     Serial.println("[DANGER]");
   }
-  else if (vibrationWarning)
+  else if (
+    vibration >=
+    VIBRATION_WARNING_LIMIT
+  )
   {
     Serial.println("[WARNING]");
   }
@@ -383,13 +453,17 @@ void loop()
     Serial.println("[NORMAL]");
   }
 
-  // Motor speed
+  // ===================================================
+  // MOTOR SPEED
+  // ===================================================
 
   Serial.print("Motor Speed : ");
   Serial.print(motorSpeedPercent);
   Serial.println("%");
 
-  // Motor state
+  // ===================================================
+  // MOTOR STATE
+  // ===================================================
 
   Serial.print("Motor       : ");
 
@@ -403,22 +477,13 @@ void loop()
   }
 
   Serial.println("================================");
-
-  // ===================================================
-  // MONITOR EVERY 2 SECONDS
-  // ===================================================
-
-  delay(2000);
 }
 
 // =====================================================
 // BUTTON CONTROL
 // =====================================================
 
-void checkButtons(
-  bool temperatureHigh,
-  bool vibrationHigh
-)
+void checkButtons()
 {
   bool startState =
     digitalRead(START_BUTTON);
@@ -433,7 +498,7 @@ void checkButtons(
     digitalRead(STOP_BUTTON);
 
   // ===================================================
-  // START
+  // START BUTTON
   // ===================================================
 
   if (
@@ -441,41 +506,15 @@ void checkButtons(
     startState == LOW
   )
   {
+    motorRunning = true;
+
     Serial.println();
     Serial.println("START BUTTON PRESSED");
+    Serial.println("Motor STARTED");
 
-    // Start only if sensors are safe
+    setMotorSpeed();
 
-    if (
-      !temperatureHigh &&
-      !vibrationHigh
-    )
-    {
-      motorRunning = true;
-
-      Serial.println("Motor STARTED");
-      Serial.print("Speed: ");
-      Serial.print(motorSpeedPercent);
-      Serial.println("%");
-
-      setMotorSpeed();
-    }
-    else
-    {
-      Serial.println("Motor CANNOT START");
-
-      if (temperatureHigh)
-      {
-        Serial.println("Temperature is DANGER");
-      }
-
-      if (vibrationHigh)
-      {
-        Serial.println("Vibration is DANGER");
-      }
-    }
-
-    delay(250);
+    delay(200);
   }
 
   // ===================================================
@@ -494,7 +533,7 @@ void checkButtons(
       motorSpeedPercent = 100;
     }
 
-    Serial.print("Speed increased to ");
+    Serial.print("Speed increased: ");
     Serial.print(motorSpeedPercent);
     Serial.println("%");
 
@@ -503,7 +542,7 @@ void checkButtons(
       setMotorSpeed();
     }
 
-    delay(250);
+    delay(200);
   }
 
   // ===================================================
@@ -522,7 +561,7 @@ void checkButtons(
       motorSpeedPercent = 0;
     }
 
-    Serial.print("Speed decreased to ");
+    Serial.print("Speed decreased: ");
     Serial.print(motorSpeedPercent);
     Serial.println("%");
 
@@ -531,11 +570,11 @@ void checkButtons(
       setMotorSpeed();
     }
 
-    delay(250);
+    delay(200);
   }
 
   // ===================================================
-  // STOP
+  // STOP BUTTON
   // ===================================================
 
   if (
@@ -545,13 +584,16 @@ void checkButtons(
   {
     motorRunning = false;
 
-    analogWrite(MOTOR_PWM_PIN, 0);
+    analogWrite(
+      MOTOR_PWM_PIN,
+      0
+    );
 
     Serial.println();
     Serial.println("STOP BUTTON PRESSED");
     Serial.println("Motor STOPPED");
 
-    delay(250);
+    delay(200);
   }
 
   // ===================================================

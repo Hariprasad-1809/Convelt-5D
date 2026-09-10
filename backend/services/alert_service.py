@@ -65,3 +65,31 @@ def evaluate_and_trigger_alerts(
         return alert_record
 
     return None
+
+
+_last_vision_alert_time = {}
+
+def trigger_vision_damage_alert(db: Session, joint_id: str, confidence: float, vision_score: float) -> Optional[AlertHistory]:
+    """
+    Triggers a debounced HIGH PRIORITY alert when YOLO vision detects joint DAMAGE.
+    Cooldown: 30 seconds per joint ID to avoid repeated frame-by-frame alert spam.
+    """
+    import time
+    now = time.time()
+    last_time = _last_vision_alert_time.get(joint_id, 0)
+    
+    if now - last_time < 30.0:  # 30-second cooldown
+        return None
+
+    _last_vision_alert_time[joint_id] = now
+    alert_record = crud.create_alert(
+        db=db,
+        alert_data={
+            "joint_id": joint_id,
+            "alert_type": "VISION_JOINT_DAMAGE",
+            "risk_level": "HIGH",
+            "message": f"Joint {joint_id} physical damage detected by YOLO vision classifier (Confidence: {confidence*100:.1f}%, Vision Score: {vision_score}/100)."
+        }
+    )
+    return alert_record
+

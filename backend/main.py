@@ -26,8 +26,9 @@ from backend.config import settings
 from backend.database.db import engine, Base, init_db
 from backend.services.simulation_service import simulation_engine
 from backend.services.serial_service import serial_service
+from backend.services.vision_service import vision_service
 from backend.websocket import telemetry_ws
-from backend.api import joints, sensors, health, alerts, history, simulation
+from backend.api import joints, sensors, health, alerts, history, simulation, vision
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -37,22 +38,50 @@ async def lifespan(app: FastAPI):
     if settings.DEBUG:
         simulation_engine.start()
 
-
-    # Start Arduino UNO Serial Service on main event loop
+    # Start Arduino UNO Serial Service and Vision Service on main event loop
     loop = asyncio.get_running_loop()
     serial_service.start(loop)
+    vision_service.start(loop)
 
     yield
-    # Shutdown: Stop serial reader & simulation engine threads
+    # Shutdown: Stop vision service, serial reader & simulation engine threads
+    vision_service.stop()
     serial_service.stop()
     simulation_engine.stop()
+
+from uvicorn.protocols.utils import ClientDisconnected
+
+
+class SuppressClientDisconnectASGI:
+    """ASGI middleware that silently catches ClientDisconnected & CancelledError on streaming endpoints."""
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        try:
+            await self.app(scope, receive, send)
+        except (ClientDisconnected, asyncio.CancelledError):
+            pass
+        except BaseException as e:
+            err_name = type(e).__name__
+            if err_name in ("ExceptionGroup", "BaseExceptionGroup"):
+                sub_excs = getattr(e, "exceptions", [])
+                if sub_excs and all(
+                    isinstance(sub, (ClientDisconnected, asyncio.CancelledError)) or type(sub).__name__ in ("ClientDisconnected", "CancelledError")
+                    for sub in sub_excs
+                ):
+                    return
+            raise
+
 
 app = FastAPI(
     title=settings.PROJECT_NAME,
     version=settings.VERSION,
-    description="JointGuard Conveyor-Belt Joint Health Monitoring Backend (Arduino UNO Serial + WebSockets)",
+    description="JointGuard Conveyor-Belt Joint Health Monitoring Backend (Arduino UNO Serial + YOLO Camera + WebSockets)",
     lifespan=lifespan
 )
+
+app.add_middleware(SuppressClientDisconnectASGI)
 
 # Enable CORS for React frontend dashboard
 app.add_middleware(
@@ -77,6 +106,8 @@ app.include_router(alerts.router)
 app.include_router(history.router)
 app.include_router(simulation.router)
 app.include_router(telemetry_ws.router)
+app.include_router(vision.router)
+
 
 
 @app.get("/")

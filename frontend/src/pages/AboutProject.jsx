@@ -54,17 +54,18 @@ export default function AboutProject() {
         </div>
         <ul style={{ fontSize: 'var(--text-xs)', color: 'var(--text-secondary)', lineHeight: 2, paddingLeft: '20px' }}>
           <li>
-            <strong>Health Scoring:</strong> Rule-based weighted fusion formula (0.40 Vision + 0.30 Magnetic + 0.20 Vibration + 0.10 Temperature) — explicitly deterministic, not machine learning in Phase 1.
+            <strong>Health Scoring:</strong> Rule-based weighted fusion formula (0.40 Vision + 0.30 Magnetic + 0.20 Vibration + 0.10 Temperature) — explicitly deterministic multi-modal fusion.
           </li>
           <li>
             <strong>Hall Sensor:</strong> A3144 Hall effect sensor is a magnetic-event demonstration sensor for detecting joint pulse markers — not an industrial electromagnetic (EM/MFL) steel cord scanner.
           </li>
           <li>
-            <strong>Vision Analysis:</strong> Vision score is simulated or manually injected via the REST API — full camera pipeline with YOLOv8/ByteTrack is slated for Phase 2.
+            <strong>Vision Analysis:</strong> Integrated live USB camera pipeline powered by OpenCV specular joint localization & YOLOv8 classification (`yolov8n-cls`).
           </li>
           <li>
-            <strong>Telemetry Streaming:</strong> Periodic REST API polling (2.0s interval) — WebSocket streaming is planned for Phase 2.
+            <strong>Telemetry Streaming:</strong> Combined WebSocket gateway (`/api/v1/ws/telemetry`) broadcasting live hardware serial telemetry and YOLO camera update streams.
           </li>
+
         </ul>
       </div>
 

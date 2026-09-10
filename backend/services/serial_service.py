@@ -171,9 +171,14 @@ class SerialReaderService:
                 active_port = find_arduino_port(self.port)
                 logger.info(f"[SERIAL] Using {active_port}")
                 
-                self._serial_conn = serial.Serial(active_port, self.baud, timeout=1.5)
+                self._serial_conn = serial.Serial()
+                self._serial_conn.port = active_port
+                self._serial_conn.baudrate = self.baud
+                self._serial_conn.timeout = 1.5
+                self._serial_conn.dtr = False
+                self._serial_conn.open()
                 self.port = active_port
-                time.sleep(2) # Give Arduino bootloader time to stabilize
+                time.sleep(1) # Give Arduino serial buffer time to stabilize
                 
                 self.connection_status = "CONNECTED"
                 logger.info(f"[SERIAL] Arduino UNO connected on {self.port}")
@@ -186,18 +191,20 @@ class SerialReaderService:
                     try:
                         raw_line = self._serial_conn.readline()
                         if not raw_line:
-                            # Check 5s timeout if no telemetry received
-                            if time.time() - last_pkt_time > 5.0 and self.connection_status == "CONNECTED":
-                                logger.warning(f"[SERIAL] Hardware telemetry timeout (>5s without serial frame)")
+                            # Check 60s timeout if no telemetry received
+                            if time.time() - last_pkt_time > 60.0:
+                                logger.warning(f"[SERIAL] Hardware telemetry timeout (>60s without serial frame)")
+                                logger.warning(f"[SERIAL] Ensure PlatformIO / Arduino Serial Monitor is CLOSED and USB cable is secure.")
                                 self.connection_status = "DISCONNECTED"
-                                self._notify_status("DISCONNECTED", "Hardware timeout: No serial data received for 5s")
+                                self._notify_status("DISCONNECTED", "Hardware timeout: No serial data received for 60s")
+                                break
                             continue
 
+                        last_pkt_time = time.time()
                         line = raw_line.decode('utf-8', errors='ignore').strip()
                         if not line:
                             continue
 
-                        last_pkt_time = time.time()
                         if self.connection_status != "CONNECTED":
                             self.connection_status = "CONNECTED"
                             self._notify_status("CONNECTED", f"Serial telemetry restored on {self.port}")
@@ -216,7 +223,7 @@ class SerialReaderService:
 
             except (serial.SerialException, OSError) as conn_err:
                 logger.warning(f"[SERIAL] FAILED TO OPEN {self.port}: {conn_err}")
-                logger.warning(f"[SERIAL] {self.port} may be busy/in use by another application (e.g. PlatformIO Serial Monitor).")
+                logger.warning(f"[SERIAL] {self.port} may be busy/in use by another application (e.g. PlatformIO / VS Code Serial Monitor).")
                 logger.warning(f"[SERIAL] Close PlatformIO Serial Monitor and retry. Retrying in {settings.SERIAL_RECONNECT_INTERVAL_SECONDS}s...")
                 self.connection_status = "DISCONNECTED"
                 self._notify_status("DISCONNECTED", f"Unable to open {self.port} (Port busy or disconnected)")

@@ -5,6 +5,7 @@ import { getValueStatus } from '../data/mockData';
 import { DEFAULT_THRESHOLDS, JOINT_IDS, SENSOR_INFO } from '../data/constants';
 import StatusBadge from '../components/ui/StatusBadge';
 import SensorChart from '../components/ui/SensorChart';
+import CameraVision from '../components/ui/CameraVision';
 
 const TIME_RANGES = [
   { label: '1 min', points: 15 },
@@ -30,7 +31,8 @@ function SensorStatusRow({ label, sensor, connected }) {
 }
 
 export default function SensorData() {
-  const { joints = {}, lastUpdated, apiConnected, simStatus, hardwareStatus, wsStatus = 'CONNECTING', rawSerialLogs = [] } = useSimulation();
+  const { joints = {}, lastUpdated, apiConnected, simStatus, hardwareStatus, wsStatus = 'CONNECTING', rawSerialLogs = [], visionData, cameraStatus } = useSimulation();
+
 
   const [selectedJoint, setSelectedJoint] = useState('J01');
   const [selectedSensor, setSelectedSensor] = useState('all');
@@ -44,7 +46,7 @@ export default function SensorData() {
     const hist = joint?.temperatureHistory ?? [];
     const vhist = joint?.vibrationHistory ?? [];
     return hist.slice(-20).map((tp, i) => ({
-      id: `${selectedJoint}-${tp.timestamp}`,
+      id: `${selectedJoint}-${tp.timestamp}-${i}`,
       timestamp: tp.timestamp,
       time: tp.time,
       jointId: selectedJoint,
@@ -160,8 +162,14 @@ export default function SensorData() {
         </div>
       </div>
 
+      {/* Live YOLO Camera Vision Inspector Component */}
+      <div style={{ marginBottom: '20px' }}>
+        <CameraVision visionData={visionData} cameraStatus={cameraStatus} activeJoint={selectedJoint} />
+      </div>
+
       {/* Live Arduino UNO Hardware Telemetry & Raw Serial Monitor Box */}
       <div className="card" style={{ marginBottom: '20px', padding: '16px' }}>
+
         <div className="section-header" style={{ marginBottom: '12px' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
             <span style={{ display: 'inline-block', width: 8, height: 8, borderRadius: '50%', background: isArduinoConnected ? 'var(--status-normal)' : 'var(--status-high)' }} />

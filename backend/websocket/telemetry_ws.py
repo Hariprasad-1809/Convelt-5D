@@ -48,6 +48,7 @@ class ConnectionManager:
             self.disconnect(client)
 
 manager = ConnectionManager()
+telemetry_ws = manager  # Global export alias
 
 def broadcast_telemetry_sync(loop: asyncio.AbstractEventLoop, payload: dict):
     """Safely schedule a broadcast onto the main asyncio loop from background threads."""
@@ -55,6 +56,7 @@ def broadcast_telemetry_sync(loop: asyncio.AbstractEventLoop, payload: dict):
         asyncio.run_coroutine_threadsafe(manager.broadcast(payload), loop)
 
 @router.websocket("/telemetry")
+@router.websocket("/ws/telemetry")
 async def websocket_telemetry_endpoint(websocket: WebSocket):
     await manager.connect(websocket)
     try:
@@ -68,3 +70,4 @@ async def websocket_telemetry_endpoint(websocket: WebSocket):
     except Exception as e:
         logger.error(f"WebSocket connection error: {e}")
         manager.disconnect(websocket)
+

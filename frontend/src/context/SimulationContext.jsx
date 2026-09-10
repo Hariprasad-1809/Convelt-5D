@@ -122,7 +122,18 @@ export function SimulationProvider({ children }) {
   });
 
   const [rawSerialLogs, setRawSerialLogs] = useState([]);
+  const [visionData, setVisionData] = useState({
+    label: 'NO_JOINT',
+    confidence: 0,
+    vision_score: null,
+    camera_status: 'DISCONNECTED',
+    joint_id: 'J01',
+    timestamp: null,
+  });
+  const [cameraStatus, setCameraStatus] = useState('DISCONNECTED');
+
   const isPollingRef = useRef(false);
+
 
   // WebSocket Lifecycle Refs
   const wsRef = useRef(null);
@@ -227,6 +238,22 @@ export function SimulationProvider({ children }) {
                     temperatureHistory: newTempHist,
                     vibrationHistory: newVibHist,
                     lastUpdated: data.timestamp,
+                  },
+                };
+              });
+            } else if (data.type === 'vision_update' || data.type === 'vision_telemetry') {
+              setVisionData(data);
+              setCameraStatus(data.camera_status || 'CONNECTED');
+              const targetJid = data.joint_id || 'J01';
+              setJoints((prevJoints) => {
+                const existing = prevJoints[targetJid] || {};
+                return {
+                  ...prevJoints,
+                  [targetJid]: {
+                    ...existing,
+                    vision_score: data.vision_score !== undefined ? data.vision_score : existing.vision_score,
+                    vision_label: data.label || existing.vision_label,
+                    vision_confidence: data.confidence || existing.vision_confidence,
                   },
                 };
               });
@@ -617,6 +644,9 @@ export function SimulationProvider({ children }) {
     rawSerialLogs,
     dataSource,
     setDataSource,
+    visionData,
+    cameraStatus,
+
 
     // Simulation controls & status
     simStatus,

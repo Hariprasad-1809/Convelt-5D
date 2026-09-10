@@ -112,6 +112,14 @@ class SimulationEngine:
                     is_inspecting = (zone_state == "INSPECTING")
                     
                     from backend.services.serial_service import serial_service
+                    from backend.services.vision_service import vision_service
+
+                    # Check if live camera vision score is available for this joint
+                    live_vision_res = vision_service.get_latest_result()
+                    live_v_score = None
+                    if vision_service.camera_status == "CONNECTED" and live_vision_res.get("joint_id") == jid:
+                        live_v_score = live_vision_res.get("vision_score")
+
                     if jid == "J01" and serial_service.connection_status == "CONNECTED":
                         latest = crud.get_latest_reading(db, "J01")
                         if latest and latest.temperature is not None:
@@ -121,12 +129,17 @@ class SimulationEngine:
                                 "hall_event": latest.hall_event,
                                 "hall_event_expected": is_inspecting,
                                 "magnetic_value": latest.magnetic_value,
-                                "vision_score": latest.vision_score or 85.0
+                                "vision_score": live_v_score if live_v_score is not None else (latest.vision_score or 85.0)
                             }
                         else:
                             raw_data = self._generate_joint_telemetry(jid, is_inspecting)
+                            if live_v_score is not None:
+                                raw_data["vision_score"] = live_v_score
                     else:
                         raw_data = self._generate_joint_telemetry(jid, is_inspecting)
+                        if live_v_score is not None:
+                            raw_data["vision_score"] = live_v_score
+
 
                     # Apply manual override if specified
                     if jid in self.manual_overrides:
