@@ -217,6 +217,7 @@ def detect_joint(frame: np.ndarray, config: Optional[VisionConfig] = None) -> Op
     gray_full = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
     valid_candidates: List[Tuple[float, BoundingBox]] = []
+    fallback_candidates: List[Tuple[float, BoundingBox]] = []
     rejected_diagnostics: List[Dict[str, Any]] = []
 
     for bx_roi, by_roi, bw, bh in merged_boxes:
@@ -227,8 +228,9 @@ def detect_joint(frame: np.ndarray, config: Optional[VisionConfig] = None) -> Op
         r = float(bw) / float(bh)
         aspect = r if r >= 1.0 else 1.0 / r
 
-        # Area check
-        if box_area < cfg.MIN_CONTOUR_AREA or box_area > effective_max_contour_area:
+        # Area check (standard min area, or relaxed min area for entering edges)
+        min_area_thresh = cfg.MIN_CONTOUR_AREA
+        if box_area < min_area_thresh or box_area > effective_max_contour_area:
             rejected_diagnostics.append({
                 "bbox": (x_full, y_full, bw, bh),
                 "area": box_area,
@@ -236,12 +238,21 @@ def detect_joint(frame: np.ndarray, config: Optional[VisionConfig] = None) -> Op
                 "contrast_delta": 0.0,
                 "candidate_mean": 0.0,
                 "margin_mean": 0.0,
-                "reason": f"area out of bounds ({box_area} vs min {cfg.MIN_CONTOUR_AREA}, max {effective_max_contour_area:.0f})"
+                "reason": f"area out of bounds ({box_area} vs min {min_area_thresh}, max {effective_max_contour_area:.0f})"
             })
             continue
 
-        # Aspect ratio check
-        if aspect < cfg.MIN_ASPECT_RATIO or aspect > cfg.MAX_ASPECT_RATIO:
+        # Two-tier aspect ratio evaluation for continuous belt motion:
+        # Tier 1: Standard aspect ratio for fully framed joints
+        # Tier 2: Relaxed fallback for partially entered or motion-skewed joints
+        min_aspect_relaxed = getattr(cfg, "MIN_ASPECT_RATIO_RELAXED", 0.4)
+        max_aspect_relaxed = getattr(cfg, "MAX_ASPECT_RATIO_RELAXED", 35.0)
+        allow_fallback = getattr(cfg, "ALLOW_PARTIAL_ENTRY_FALLBACK", True)
+
+        is_standard_aspect = (aspect >= cfg.MIN_ASPECT_RATIO and aspect <= cfg.MAX_ASPECT_RATIO)
+        is_relaxed_aspect = allow_fallback and (aspect >= min_aspect_relaxed and aspect <= max_aspect_relaxed)
+
+        if not is_standard_aspect and not is_relaxed_aspect:
             rejected_diagnostics.append({
                 "bbox": (x_full, y_full, bw, bh),
                 "area": box_area,
@@ -332,18 +343,25 @@ def detect_joint(frame: np.ndarray, config: Optional[VisionConfig] = None) -> Op
         candidate_score = float(box_area) * centrality_factor
 
         bbox = BoundingBox(x=x_full, y=y_full, w=bw, h=bh)
-        valid_candidates.append((candidate_score, bbox))
+        if is_standard_aspect:
+            valid_candidates.append((candidate_score, bbox))
+        else:
+            # Fallback candidate for partially entered/skewed joint during belt motion
+            fallback_candidates.append((candidate_score * 0.7, bbox))
 
-    if not valid_candidates:
-        if rejected_diagnostics:
-            # Log the single top candidate (largest area) with computed contrast & area values
-            top_rej = max(rejected_diagnostics, key=lambda c: c["area"])
-            print(f"[DEBUG] Top rejected candidate: bbox={top_rej['bbox']} | area={top_rej['area']} (min: {cfg.MIN_CONTOUR_AREA}) | contrast_delta={top_rej['contrast_delta']:.1f} (min: {cfg.MIN_CONTEXT_CONTRAST:.1f} | cand={top_rej['candidate_mean']:.1f}, margin={top_rej['margin_mean']:.1f}) | reason={top_rej['reason']}")
-        return None
+    # Prefer standard aspect ratio candidates; if none exist (e.g. entering joint), use fallback candidate
+    if valid_candidates:
+        valid_candidates.sort(key=lambda item: item[0], reverse=True)
+        return valid_candidates[0][1]
+    elif fallback_candidates:
+        fallback_candidates.sort(key=lambda item: item[0], reverse=True)
+        return fallback_candidates[0][1]
 
-    # Pick the single best candidate (highest scored contour)
-    valid_candidates.sort(key=lambda item: item[0], reverse=True)
-    return valid_candidates[0][1]
+    if rejected_diagnostics:
+        # Log the single top candidate (largest area) with computed contrast & area values
+        top_rej = max(rejected_diagnostics, key=lambda c: c["area"])
+        print(f"[DEBUG] Top rejected candidate: bbox={top_rej['bbox']} | area={top_rej['area']} (min: {cfg.MIN_CONTOUR_AREA}) | contrast_delta={top_rej['contrast_delta']:.1f} (min: {cfg.MIN_CONTEXT_CONTRAST:.1f} | cand={top_rej['candidate_mean']:.1f}, margin={top_rej['margin_mean']:.1f}) | reason={top_rej['reason']}")
+    return None
 
 
 # Function attribute for mask storage

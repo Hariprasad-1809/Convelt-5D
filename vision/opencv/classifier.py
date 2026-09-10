@@ -20,7 +20,7 @@ try:
     import torch.nn as nn
     import torchvision.models as models
     TORCH_AVAILABLE = True
-except ImportError:
+except (ImportError, OSError, Exception):
     TORCH_AVAILABLE = False
 
 from vision.opencv.config import VisionConfig, DEFAULT_CONFIG
@@ -122,16 +122,28 @@ class TrainableJointClassifier(BaseJointClassifier):
             return False
 
         try:
-            if resolved_path.endswith(".pth") and TORCH_AVAILABLE:
-                model = _build_mobilenet_v2(num_classes=2)
-                state_dict = torch.load(resolved_path, map_location="cpu", weights_only=True)
-                model.load_state_dict(state_dict)
-                model.eval()
-                self.model = model
-            elif resolved_path.endswith(".pt") and TORCH_AVAILABLE:
-                model = torch.load(resolved_path, map_location="cpu", weights_only=False)
-                model.eval()
-                self.model = model
+            if resolved_path.endswith(".pth"):
+                if TORCH_AVAILABLE:
+                    model = _build_mobilenet_v2(num_classes=2)
+                    state_dict = torch.load(resolved_path, map_location="cpu", weights_only=True)
+                    model.load_state_dict(state_dict)
+                    model.eval()
+                    self.model = model
+                else:
+                    print(f"[INFO] PyTorch runtime unavailable; using Classical CV fallback for {resolved_path}")
+                    self.model = None
+                    self._load_attempted = True
+                    return False
+            elif resolved_path.endswith(".pt"):
+                if TORCH_AVAILABLE:
+                    model = torch.load(resolved_path, map_location="cpu", weights_only=False)
+                    model.eval()
+                    self.model = model
+                else:
+                    print(f"[INFO] PyTorch runtime unavailable; using Classical CV fallback for {resolved_path}")
+                    self.model = None
+                    self._load_attempted = True
+                    return False
             elif resolved_path.endswith((".joblib", ".pkl")):
                 self.model = joblib.load(resolved_path)
             else:
@@ -243,7 +255,7 @@ class TrainableJointClassifier(BaseJointClassifier):
 
 
 class ClassicalCVClassifier(BaseJointClassifier):
-    """Fallback Classical CV feature-based classifier using Canny edges and texture variance."""
+    """Fallback Classical CV feature-based classifier using Canny edges, Hough lines, and intensity variance."""
 
     def classify(self, roi_frame: np.ndarray, config: Optional[VisionConfig] = None) -> ClassificationResult:
         cfg = config if config is not None else DEFAULT_CONFIG
@@ -255,28 +267,111 @@ class ClassicalCVClassifier(BaseJointClassifier):
                 features={"edge_density": 0.0, "hough_line_score": 0.0, "intensity_variance": 0.0}
             )
 
-        gray = cv2.cvtColor(roi_frame, cv2.COLOR_BGR2GRAY) if len(roi_frame.shape) == 3 else roi_frame
-        blurred_gray = cv2.GaussianBlur(gray, (5, 5), 0)
+        # Convert ROI to BGR / Grayscale / HSV
+        if len(roi_frame.shape) == 3:
+            bgr = roi_frame
+            gray = cv2.cvtColor(roi_frame, cv2.COLOR_BGR2GRAY)
+        else:
+            gray = roi_frame.copy()
+            bgr = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
+
+        # 1. Feature 1: Patch Continuity & Sub-contour Fragmentation
+        hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
+        v_chan = hsv[:, :, 2]
+        v_median = float(np.median(v_chan)) if v_chan.size > 0 else 120.0
+        v_lower = max(int(cfg.HSV_LOWER[2]), min(210, int(v_median + 20.0)))
+        mask = cv2.inRange(hsv, np.array([0, 0, v_lower], dtype=np.uint8), np.array([180, int(cfg.HSV_UPPER[1]), int(cfg.HSV_UPPER[2])], dtype=np.uint8))
+
+        pts = cv2.findNonZero(mask)
+        if pts is not None:
+            fx, fy, fw, fh = cv2.boundingRect(pts)
+            foil_crop_gray = gray[fy:fy + fh, fx:fx + fw]
+            foil_crop_mask = mask[fy:fy + fh, fx:fx + fw]
+        else:
+            foil_crop_gray = gray
+            foil_crop_mask = mask
+
+        cnts, _ = cv2.findContours(foil_crop_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        large_cnts = [c for c in cnts if cv2.contourArea(c) > 500]
+        total_mask_px = float(np.count_nonzero(foil_crop_mask))
+
+        if total_mask_px > 0 and large_cnts:
+            max_area = max([cv2.contourArea(c) for c in large_cnts])
+            raw_patch_continuity = float(max_area / total_mask_px)
+        else:
+            raw_patch_continuity = 1.0
+
+        raw_frag_count = len(large_cnts)
+        cont_penalty = max(0.0, 1.0 - raw_patch_continuity)
+        frag_penalty = min(1.0, max(0.0, float(raw_frag_count - 1) * 0.20))
+        norm_struct_penalty = min(1.0, 0.6 * cont_penalty + 0.4 * frag_penalty)
+
+        # 2. Feature 2: Edge Density
+        blurred_gray = cv2.GaussianBlur(foil_crop_gray, (5, 5), 0)
         edges = cv2.Canny(blurred_gray, int(cfg.CANNY_THRESHOLD1), int(cfg.CANNY_THRESHOLD2))
         edge_pixel_count = float(np.count_nonzero(edges))
-        raw_edge_density = edge_pixel_count / float(gray.size) if gray.size > 0 else 0.0
-
-        raw_intensity_var = float(np.std(gray))
+        raw_edge_density = edge_pixel_count / float(foil_crop_gray.size) if foil_crop_gray.size > 0 else 0.0
         norm_edge_penalty = min(1.0, raw_edge_density / float(cfg.EDGE_DENSITY_MAX_EXPECTED))
+
+        # 3. Feature 3: Hough Line Crease Detection
+        lines = cv2.HoughLinesP(
+            edges,
+            cfg.HOUGH_RHO,
+            cfg.HOUGH_THETA,
+            cfg.HOUGH_THRESHOLD,
+            minLineLength=cfg.HOUGH_MIN_LINE_LENGTH,
+            maxLineGap=cfg.HOUGH_MAX_LINE_GAP
+        )
+
+        hough_line_score = 0.0
+        if lines is not None:
+            for line in lines:
+                x1, y1, x2, y2 = line.ravel()
+                dx = float(x2 - x1)
+                dy = float(y2 - y1)
+                length = np.sqrt(dx * dx + dy * dy)
+                angle_deg = np.degrees(np.abs(np.arctan2(dy, dx)))
+                if angle_deg > 90.0:
+                    angle_deg = 180.0 - angle_deg
+                if cfg.HOUGH_DIAGONAL_MIN_ANGLE <= angle_deg <= cfg.HOUGH_DIAGONAL_MAX_ANGLE:
+                    hough_line_score += length
+
+            roi_diag = np.sqrt(foil_crop_gray.shape[0] ** 2 + foil_crop_gray.shape[1] ** 2)
+            raw_hough_score = float(hough_line_score / roi_diag) if roi_diag > 0 else 0.0
+        else:
+            raw_hough_score = 0.0
+
+        norm_hough_penalty = min(1.0, raw_hough_score / 5.0)
+
+        # 4. Feature 4: Local Intensity Variance
+        blurred_var = cv2.GaussianBlur(foil_crop_gray, cfg.VARIANCE_BLUR_KERNEL, 0)
+        raw_intensity_var = float(np.std(blurred_var)) if blurred_var.size > 0 else 0.0
         norm_var_penalty = min(1.0, max(0.0, (raw_intensity_var - 30.0) / float(cfg.VARIANCE_MAX_EXPECTED - 30.0)))
 
-        total_damage_penalty = 0.5 * norm_var_penalty + 0.5 * norm_edge_penalty
+        # 5. Combined Score
+        total_damage_penalty = (
+            0.50 * norm_struct_penalty +
+            0.30 * norm_var_penalty +
+            0.10 * norm_edge_penalty +
+            0.10 * norm_hough_penalty
+        )
+
         vision_score = max(0.0, min(100.0, 100.0 * (1.0 - total_damage_penalty)))
         label = "HEALTHY" if vision_score >= cfg.HEALTHY_THRESHOLD_SCORE else "DAMAGE"
+
+        features = {
+            "patch_continuity": float(raw_patch_continuity),
+            "fragment_count": float(raw_frag_count),
+            "edge_density": float(raw_edge_density),
+            "hough_line_score": float(raw_hough_score),
+            "intensity_variance": float(raw_intensity_var),
+            "confidence": 0.75
+        }
 
         return ClassificationResult(
             label=label,
             vision_score=float(vision_score),
-            features={
-                "edge_density": round(raw_edge_density, 4),
-                "intensity_variance": round(raw_intensity_var, 2),
-                "confidence": 0.75
-            }
+            features=features
         )
 
 

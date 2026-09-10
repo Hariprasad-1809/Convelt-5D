@@ -44,6 +44,9 @@ class VisionConfig:
     MAX_CONTOUR_AREA_FRACTION_OF_ROI: float = 1.0   # Max candidate area relative to ROI area (allows large joint plates filling capture zone)
     MIN_ASPECT_RATIO: float = 1.0        # Aspect ratio = width / height (or height/width, min 1.0 for square patches)
     MAX_ASPECT_RATIO: float = 20.0       # Upper bound for rectangular joint patch shape (allows wide/long metallic foil joints)
+    MIN_ASPECT_RATIO_RELAXED: float = 0.4  # Fallback lower bound for partially entering or motion-skewed joints
+    MAX_ASPECT_RATIO_RELAXED: float = 35.0 # Fallback upper bound for narrow initial joint slivers entering zone
+    ALLOW_PARTIAL_ENTRY_FALLBACK: bool = True # Enable two-tier aspect fallback when no standard candidate passes
     CONTOUR_CLUSTER_MAX_GAP_PX: int = 80 # Max pixel gap between nearby patch fragments to cluster them into one candidate box
     CONTOUR_MERGE_GAP_PIXELS: int = 80   # Alias for backward compatibility
 
@@ -77,6 +80,15 @@ class VisionConfig:
     CAPTURE_ZONE_Y_MAX: float = 0.80
     CAPTURE_ZONE_MIN_FRAMES: int = 2      # Min consecutive frames inside capture zone to trigger INSPECTING
     CAPTURE_ZONE_MAX_FRAMES: int = 10     # Max frames window to aggregate feature snapshots
+
+    # Zone Hysteresis & Debounce for Continuous Belt Motion (Eliminates INSIDE vs OUTSIDE_ZONE flicker)
+    ZONE_HYSTERESIS_MARGIN_PIXELS: int = 25  # Expansion buffer for exit boundary relative to inner capture zone
+    ZONE_EXIT_DEBOUNCE_FRAMES: int = 4       # Consecutive frames required outside exit boundary before exiting zone
+
+    # Classification Stabilization & Reconciliation (Harmonizes Final vs Current)
+    CLASSIFICATION_STABILITY_FRAMES: int = 4 # Min frames sampled before locking initial classification
+    DISAGREEMENT_CORRECTION_STREAK: int = 3  # Consecutive strong disagreeing reads required to update locked result
+    DISAGREEMENT_CONFIDENCE_THRESHOLD: float = 0.65 # Confidence threshold to trigger dynamic disagreement reconciliation
 
     # Motion Blur Awareness & Velocity Validation
     # Neural network inference handles diffuse/motion-blurred textures natively
