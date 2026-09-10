@@ -190,9 +190,8 @@ function HealthItem({ label, value, detail, ok }) {
 // ─── Dashboard ────────────────────────────────────────────────────────────────
 export default function Dashboard() {
   const navigate = useNavigate();
-  const { joints, lastUpdated, hardwareStatus, apiConnected } = useLiveSensorData();
+  const { joints, lastUpdated, hardwareStatus, apiConnected, visionData, cameraStatus } = useLiveSensorData();
   const { activeAlerts, summary } = useAlerts();
-
 
   const [quickViewId, setQuickViewId] = useState(null);
   const [selectedChartJoint, setSelectedChartJoint] = useState('J01');
@@ -291,12 +290,16 @@ export default function Dashboard() {
         <MetricCard
           icon={<Radio size={15} />}
           label="Hardware Node (UNO)"
-          value={hardwareStatus?.connection_status === 'CONNECTED' ? 'Connected' : (apiConnected ? `Ready (${hardwareStatus?.port || 'COM4'})` : 'Offline')}
+          value={hardwareStatus?.connection_status === 'CONNECTED' ? 'Connected' : (apiConnected ? `Ready (${hardwareStatus?.port || 'COM5'})` : 'Offline')}
           unit=""
           status={hardwareStatus?.connection_status === 'CONNECTED' ? STATUS.NORMAL : STATUS.HIGH}
-          subtext={`${hardwareStatus?.port || 'COM4'} @ ${hardwareStatus?.baud || 9600} Baud · USB Serial Gateway`}
+          subtext={`${hardwareStatus?.port || 'COM5'} @ ${hardwareStatus?.baud || 9600} Baud · USB Serial Gateway`}
         />
+      </div>
 
+      {/* ── Live YOLO Camera Vision Inspector Component ── */}
+      <div style={{ marginBottom: '20px' }}>
+        <CameraVision visionData={visionData} cameraStatus={cameraStatus} activeJoint={selectedChartJoint} />
       </div>
 
       {/* ── 4. Live Charts with Joint Selector (J01 - J03) ── */}

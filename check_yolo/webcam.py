@@ -323,16 +323,33 @@ def find_joint_in_roi(
     return (final_x, final_y, final_w, final_h)
 
 
-def is_in_inner_inspection_zone(rel_bbox: Tuple[int, int, int, int], roi_w: int, roi_h: int) -> bool:
-    """Checks if joint centroid is inside central 70% inner inspection zone."""
+def is_in_inner_inspection_zone(
+    rel_bbox: Tuple[int, int, int, int],
+    roi_w: int,
+    roi_h: int,
+    is_currently_inside: bool = False
+) -> bool:
+    """
+    Checks if joint centroid is inside inner inspection zone with hysteresis.
+    - Entry Boundary: stricter central 70% zone (prevents early edge triggers)
+    - Tracking/Exit Boundary: generous 90% zone (prevents boundary chatter/flicker)
+    """
     jx, jy, jw, jh = rel_bbox
     cx = jx + jw / 2.0
     cy = jy + jh / 2.0
 
-    xmin = roi_w * 0.08
-    xmax = roi_w * 0.92
-    ymin = roi_h * 0.10
-    ymax = roi_h * 0.90
+    if is_currently_inside:
+        # Generous "still tracking" boundary
+        xmin = roi_w * 0.03
+        xmax = roi_w * 0.97
+        ymin = roi_h * 0.04
+        ymax = roi_h * 0.96
+    else:
+        # Stricter entry boundary
+        xmin = roi_w * 0.08
+        xmax = roi_w * 0.92
+        ymin = roi_h * 0.10
+        ymax = roi_h * 0.90
 
     return (xmin <= cx <= xmax) and (ymin <= cy <= ymax)
 
@@ -344,17 +361,24 @@ def calculate_sharpness(crop: np.ndarray) -> float:
     return float(cv2.Laplacian(gray, cv2.CV_64F).var())
 
 
-def check_crop_quality(crop: np.ndarray, min_sharpness: float = 100.0) -> Tuple[bool, str, float]:
+def check_crop_quality(
+    crop: np.ndarray,
+    min_sharpness: float = 100.0,
+    is_approaching: bool = False
+) -> Tuple[bool, str, float]:
     """
     Validates crop quality before sending to YOLO.
     Rejects undersized, bad aspect ratio, dark, bright, or motion-blurred crops.
     """
     h, w = crop.shape[:2]
-    if h < 25 or w < 25:
+    if h < 20 or w < 20:
         return False, "TOO SMALL", 0.0
 
     aspect_ratio = float(h) / float(w)
-    if aspect_ratio > 3.2 or aspect_ratio < 0.15:
+    # Loosened aspect ratio: allow 0.08 to 4.5 standard, widened to 0.06 to 5.0 while approaching
+    max_ar = 5.0 if is_approaching else 4.5
+    min_ar = 0.06 if is_approaching else 0.08
+    if aspect_ratio > max_ar or aspect_ratio < min_ar:
         return False, "BAD ASPECT RATIO", 0.0
 
     mean_val = float(np.mean(crop))
@@ -427,6 +451,11 @@ class JointTrack:
         self.consecutive_contradictory_count: int = 0
         self.crop_history: List[Tuple[np.ndarray, str, float, float]] = []
 
+        # Robust State Machine Hysteresis & Debounce tracking
+        self.is_inside_zone: bool = False
+        self.consecutive_outside_frames: int = 0
+        self.consecutive_lost_frames: int = 0
+
     def update_position(self, raw_bbox: Tuple[int, int, int, int], timestamp: float, alpha: float = 0.3):
         self.raw_bbox = raw_bbox
         rx, ry, rw, rh = raw_bbox
@@ -443,6 +472,7 @@ class JointTrack:
         self.last_seen_time = timestamp
         self.total_frames_seen += 1
         self.total_frames_lost = 0
+        self.consecutive_lost_frames = 0
         self.tracking_status = "VISUALIZED"
 
 
@@ -454,6 +484,9 @@ class JointGuardStateEngine:
     - EMA Bounding Box Smoothing (alpha = 0.3)
     - Temporal Hold Timeout during dropouts (TRACK_LOST_TIMEOUT = 1.5s)
     - Hysteresis (3 consecutive valid contradictory predictions required before label flip)
+    - Full temporal history accumulation across track lifetime evaluated at PASSED
+    - Aspect ratio clamping/fallback to eliminate stalls while joint enters
+    - Debounced zone boundary evaluation preventing inside/outside flicker
     - Contact Sheet Generator (debug_crops/J01_contact_sheet.jpg)
     - Clean HUD Overlay & JSONL Event Logging
     """
@@ -469,6 +502,7 @@ class JointGuardStateEngine:
         jsonl_path: Optional[str] = None,
         save_debug_crops: bool = False,
         debug_crops_dir: Optional[str] = None,
+        debounce_outside_frames: int = 5,
     ):
         self.target_frames = target_frames
         self.min_sharpness = min_sharpness
@@ -480,6 +514,7 @@ class JointGuardStateEngine:
         self.jsonl_path = jsonl_path
         self.save_debug_crops = save_debug_crops
         self.debug_crops_dir = debug_crops_dir or DEBUG_CROPS_DIR
+        self.debounce_outside_frames = debounce_outside_frames
 
         self.joint_counter = 1
         self.active_track: Optional[JointTrack] = None
@@ -501,6 +536,35 @@ class JointGuardStateEngine:
         jid = f"J{self.joint_counter:02d}"
         self.joint_counter += 1
         return jid
+
+    def _finalize_track_verdict(self, track: JointTrack):
+        """
+        Evaluates and locks the FINAL verdict based on the full temporal history
+        across the joint track's entire lifetime at the moment it transitions to PASSED.
+        """
+        if not track.accumulated_samples:
+            return
+
+        n_samples = len(track.accumulated_samples)
+        avg_h = float(np.mean([s[1] for s in track.accumulated_samples]))
+        avg_d = float(np.mean([s[2] for s in track.accumulated_samples]))
+        damage_count = sum(1 for s in track.accumulated_samples if s[0] == "DAMAGE")
+        healthy_count = sum(1 for s in track.accumulated_samples if s[0] == "HEALTHY")
+
+        if n_samples >= min(3, self.target_frames):
+            if avg_d > avg_h:
+                track.confirmed_label = "DAMAGE"
+                track.confirmed_confidence = avg_d
+            elif avg_h > avg_d:
+                track.confirmed_label = "HEALTHY"
+                track.confirmed_confidence = avg_h
+            else:
+                if damage_count >= healthy_count:
+                    track.confirmed_label = "DAMAGE"
+                    track.confirmed_confidence = avg_d
+                else:
+                    track.confirmed_label = "HEALTHY"
+                    track.confirmed_confidence = avg_h
 
     def process_frame(
         self,
@@ -540,6 +604,7 @@ class JointGuardStateEngine:
         else:
             # NO JOINT IN ROI
             if self.active_track is not None and self.active_track.tracking_status != "EXITED":
+                self.active_track.consecutive_lost_frames += 1
                 elapsed_lost = now_ts - self.active_track.last_seen_time
                 if elapsed_lost < self.track_lost_timeout:
                     self.active_track.tracking_status = "TEMPORARILY_LOST"
@@ -575,13 +640,29 @@ class JointGuardStateEngine:
 
         track = self.active_track
 
-        # 2. UPDATE INSPECTION STATE & ZONE HANDLING
-        if not in_zone:
-            if track.inspection_state == "CONFIRMED":
-                track.inspection_state = "PASSED"
-            elif track.inspection_state != "PASSED":
-                track.inspection_state = "APPROACHING"
+        # 2. UPDATE INSPECTION STATE & ZONE HANDLING WITH DEBOUNCE
+        if in_zone:
+            track.consecutive_outside_frames = 0
+            track.is_inside_zone = True
+            if track.inspection_state == "APPROACHING":
+                track.inspection_state = "INSPECTING"
+        else:
+            if track.is_inside_zone:
+                track.consecutive_outside_frames += 1
+                if track.consecutive_outside_frames >= self.debounce_outside_frames:
+                    track.is_inside_zone = False
+                    if track.inspection_state in ("INSPECTING", "CONFIRMED"):
+                        track.inspection_state = "PASSED"
+                        self._finalize_track_verdict(track)
+                        reason = "zone-exit-debounced"
+            else:
+                if track.inspection_state == "CONFIRMED":
+                    track.inspection_state = "PASSED"
+                    self._finalize_track_verdict(track)
+                elif track.inspection_state != "PASSED":
+                    track.inspection_state = "APPROACHING"
 
+        if not track.is_inside_zone:
             return {
                 "joint_id": track.joint_id,
                 "current_label": "OUTSIDE_ZONE",
@@ -594,24 +675,38 @@ class JointGuardStateEngine:
                 "rejected_blurry_count": self.rejected_blurry_count,
                 "final_label": track.confirmed_label,
                 "final_confidence": track.confirmed_confidence,
-                "avg_p_healthy": 0.0,
-                "avg_p_damage": 0.0,
+                "avg_p_healthy": float(np.mean([s[1] for s in track.accumulated_samples])) if track.accumulated_samples else 0.0,
+                "avg_p_damage": float(np.mean([s[2] for s in track.accumulated_samples])) if track.accumulated_samples else 0.0,
                 "tracking_status": track.tracking_status,
                 "inspection_state": track.inspection_state,
                 "total_frames_seen": track.total_frames_seen,
                 "total_frames_lost": track.total_frames_lost,
                 "smoothed_bbox": track.smoothed_bbox,
                 "timestamp": timestamp,
-                "reason_for_final_change": "outside-zone",
+                "reason_for_final_change": reason if reason != "no-change" else "outside-zone",
             }
 
-        # If inside inspection zone
-        if track.inspection_state == "APPROACHING":
-            track.inspection_state = "INSPECTING"
-
-        # 3. EXTRACT STABILIZED CROP USING SMOOTHED BBOX
+        # 3. EXTRACT STABILIZED CROP USING SMOOTHED BBOX (WITH ASPECT-RATIO CLAMPING)
         sx, sy, sw, sh = track.smoothed_bbox
         fh, fw = frame.shape[:2]
+
+        # Clamp/correct bounding box to nearest valid aspect ratio to prevent entry/skew stalls
+        # Conveyor joint crops should ideally have h/w in [0.20, 2.5]
+        if sw > 0 and sh > 0:
+            ar = float(sh) / float(sw)
+            if ar < 0.20:
+                # Too flat / vertically thin: expand height symmetrically with belt context
+                target_h = min(fh, max(sh, int(sw * 0.28)))
+                diff_h = target_h - sh
+                sy = max(0, sy - diff_h // 2)
+                sh = min(fh - sy, target_h)
+            elif ar > 3.0:
+                # Too narrow / horizontally thin (entering edge): expand width symmetrically
+                target_w = min(fw, max(sw, int(sh / 2.0)))
+                diff_w = target_w - sw
+                sx = max(0, sx - diff_w // 2)
+                sw = min(fw - sx, target_w)
+
         sx = max(0, min(fw - 10, sx))
         sy = max(0, min(fh - 10, sy))
         sw = max(10, min(fw - sx, sw))
@@ -624,7 +719,10 @@ class JointGuardStateEngine:
         if no_quality_check:
             is_valid, quality_reason = True, "OK"
         else:
-            is_valid, quality_reason, sharpness = check_crop_quality(joint_crop, self.min_sharpness)
+            is_approaching = (track.inspection_state == "APPROACHING")
+            is_valid, quality_reason, sharpness = check_crop_quality(
+                joint_crop, self.min_sharpness, is_approaching=is_approaching
+            )
 
         if not is_valid:
             if "BLURRY" in quality_reason:
@@ -659,10 +757,10 @@ class JointGuardStateEngine:
                 self.diag_healthy_confs.append(p_healthy)
 
             valid_frame = True
-            if len(track.accumulated_samples) < self.target_frames:
-                track.accumulated_samples.append(
-                    (current_label, p_healthy, p_damage, sharpness, timestamp)
-                )
+            # Accumulate all valid frames across track lifetime (never cap at target_frames!)
+            track.accumulated_samples.append(
+                (current_label, p_healthy, p_damage, sharpness, timestamp)
+            )
 
             # Save diagnostic crop
             if self.save_debug_crops:
@@ -681,6 +779,12 @@ class JointGuardStateEngine:
                 candidate = "DAMAGE"
                 candidate_conf = avg_d
             elif healthy_count >= 3 and avg_h >= self.healthy_thresh:
+                candidate = "HEALTHY"
+                candidate_conf = avg_h
+            elif avg_d > avg_h and avg_d >= self.damage_thresh:
+                candidate = "DAMAGE"
+                candidate_conf = avg_d
+            elif avg_h > avg_d and avg_h >= self.healthy_thresh:
                 candidate = "HEALTHY"
                 candidate_conf = avg_h
             else:
@@ -708,13 +812,13 @@ class JointGuardStateEngine:
                     track.confirmed_label = candidate
                     track.confirmed_confidence = candidate_conf
                     track.inspection_state = "CONFIRMED"
-                    reason = "5-frame-majority"
+                    reason = "temporal-majority"
                 else:
                     track.confirmed_label = "UNCERTAIN"
                     track.confirmed_confidence = candidate_conf
 
-        # Print debug trace upon 5-frame completion
-        if len(track.accumulated_samples) == self.target_frames and not self.printed_debug_for_track.get(track.joint_id, False):
+        # Print debug trace upon target_frames completion
+        if len(track.accumulated_samples) >= self.target_frames and not self.printed_debug_for_track.get(track.joint_id, False):
             self._print_5frame_debug_output(track)
             self.printed_debug_for_track[track.joint_id] = True
 
@@ -747,7 +851,10 @@ class JointGuardStateEngine:
         return res
 
     def _close_joint_track(self, track: JointTrack):
-        """Generates contact sheet when a joint exits."""
+        """Finalizes track and generates contact sheet when a joint exits."""
+        self._finalize_track_verdict(track)
+        if self.save_debug_crops and track.crop_history:
+            generate_contact_sheet(track.joint_id, self.debug_crops_dir, track.crop_history)
         if self.save_debug_crops and track.crop_history:
             generate_contact_sheet(track.joint_id, self.debug_crops_dir, track.crop_history)
 
@@ -826,7 +933,19 @@ def main():
         print(f"[ERROR] {e}", file=sys.stderr)
         sys.exit(1)
 
-    cap = cv2.VideoCapture(args.source)
+    cap = None
+    if sys.platform.startswith("win"):
+        cap_ds = cv2.VideoCapture(args.source, cv2.CAP_DSHOW)
+        if cap_ds and cap_ds.isOpened():
+            ret_ds, _ = cap_ds.read()
+            if ret_ds:
+                cap = cap_ds
+            else:
+                cap_ds.release()
+
+    if cap is None:
+        cap = cv2.VideoCapture(args.source)
+
     if not cap.isOpened():
         print(f"[ERROR] Could not open webcam source {args.source}.", file=sys.stderr)
         sys.exit(1)
@@ -927,7 +1046,13 @@ def main():
                     fx, fy = rx1 + jx, ry1 + jy
                     actual_bbox_full = (fx, fy, jw, jh)
                     joint_detected = True
-                    in_inner_zone = is_in_inner_inspection_zone(rel_bbox, roi_w, roi_h)
+                    is_currently_inside = (
+                        tracker.active_track is not None and
+                        tracker.active_track.is_inside_zone
+                    )
+                    in_inner_zone = is_in_inner_inspection_zone(
+                        rel_bbox, roi_w, roi_h, is_currently_inside=is_currently_inside
+                    )
 
             # Process frame through JointGuardStateEngine
             eval_res = tracker.process_frame(

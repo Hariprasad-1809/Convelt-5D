@@ -1,5 +1,5 @@
 # JointGuard Full System Startup Script (PowerShell)
-# Launches FastAPI Backend (managing Arduino Serial COM4 + USB Webcam Vision) & React Frontend
+# Launches FastAPI Backend (managing Arduino Serial COM5 + USB Webcam Vision) & React Frontend
 
 Write-Host "========================================================" -ForegroundColor Cyan
 Write-Host "         JointGuard Full System Startup                 " -ForegroundColor Cyan
@@ -9,7 +9,7 @@ Write-Host "Starting FastAPI Backend & React SCADA Frontend..." -ForegroundColor
 $ROOT_DIR = Get-Item $PSScriptRoot\..
 
 # 1. Start FastAPI Backend Server
-Write-Host "[1/2] Launching FastAPI Backend Server (COM4 + YOLO Camera)..." -ForegroundColor Green
+Write-Host "[1/2] Launching FastAPI Backend Server (COM5 + YOLO Camera)..." -ForegroundColor Green
 $backendProc = Start-Process powershell -ArgumentList "-NoExit", "-Command", "cd '$ROOT_DIR'; python -m uvicorn backend.main:app --host 127.0.0.1 --port 8000 --reload" -PassThru
 
 # Wait 3 seconds for FastAPI startup

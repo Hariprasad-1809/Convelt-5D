@@ -51,7 +51,7 @@ class Settings(BaseSettings):
     # --------------------------------------------------------------------------
     # SERIAL & ARDUINO UNO HARDWARE CONFIGURATION
     # --------------------------------------------------------------------------
-    SERIAL_PORT: str = os.getenv("SERIAL_PORT", "COM4")
+    SERIAL_PORT: str = os.getenv("SERIAL_PORT", "COM5")
 
     SERIAL_BAUD: int = int(os.getenv("SERIAL_BAUD", "9600"))
     DEVICE_ID: str = os.getenv("DEVICE_ID", "ARDUINO_UNO_01")

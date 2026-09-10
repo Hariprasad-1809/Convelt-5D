@@ -14,8 +14,14 @@ import time
 from datetime import datetime, timezone
 from typing import Dict, Any, Optional
 
-import serial
-import serial.tools.list_ports
+try:
+    import serial
+    import serial.tools.list_ports
+    SERIAL_AVAILABLE = True
+except ImportError:
+    serial = None
+    SERIAL_AVAILABLE = False
+
 from backend.config import settings
 from backend.database.db import SessionLocal
 from backend.models.orm_models import SensorReading, Joint
@@ -32,25 +38,45 @@ from backend.websocket.telemetry_ws import broadcast_telemetry_sync
 logger = logging.getLogger("jointguard.serial")
 
 def find_arduino_port(target_port: str) -> str:
-    """Find active COM port matching target or auto-detect Arduino board."""
-    ports = list(serial.tools.list_ports.comports())
+    """Find active COM port matching target or auto-detect Arduino board, ignoring Bluetooth serial links."""
+    if not SERIAL_AVAILABLE or serial is None:
+        return target_port
+
+    try:
+        ports = list(serial.tools.list_ports.comports())
+    except Exception as e:
+        logger.warning(f"[SERIAL] Error enumerating ports: {e}")
+        return target_port
+
     if not ports:
         return target_port
-    
-    # 1. Check if configured target_port is physically connected
+
+    # 1. Top priority: Auto-detect genuine USB Arduino / CH340 / FTDI hardware (explicitly non-Bluetooth)
     for p in ports:
-        if p.device.upper() == target_port.upper():
-            return p.device
-            
-    # 2. Auto-detect port with 'Arduino', 'CH340', or 'USB' description
-    for p in ports:
-        desc = p.description.lower()
-        if "arduino" in desc or "ch340" in desc or "usb serial" in desc:
+        desc = (p.description or "").lower()
+        hwid = (p.hwid or "").lower()
+        if "bluetooth" in desc or "bthenum" in hwid:
+            continue
+        if any(k in desc or k in hwid for k in ("arduino", "ch340", "usb serial", "usb-serial", "ftdi", "vid:pid=2341")):
             logger.info(f"[SERIAL] Auto-detected Arduino on {p.device} ({p.description})")
             return p.device
 
-    # 3. Fallback to first available COM port
-    return ports[0].device
+    # 2. Check if configured target_port is physically connected and not Bluetooth
+    for p in ports:
+        if p.device.upper() == target_port.upper():
+            desc = (p.description or "").lower()
+            if "bluetooth" not in desc:
+                return p.device
+
+    # 3. Fallback to any non-Bluetooth port
+    for p in ports:
+        desc = (p.description or "").lower()
+        if "bluetooth" not in desc:
+            logger.info(f"[SERIAL] Falling back to non-bluetooth port {p.device} ({p.description})")
+            return p.device
+
+    # 4. Fallback to target port
+    return target_port
 
 
 class SerialParser:
@@ -142,6 +168,13 @@ class SerialReaderService:
         
         self._async_loop = loop
         self._running = True
+
+        if not SERIAL_AVAILABLE:
+            logger.warning("[SERIAL] pyserial package not installed; serial service is disabled.")
+            self.connection_status = "DISCONNECTED"
+            self._notify_status("DISCONNECTED", "pyserial not installed")
+            return
+
         logger.info(f"[SERIAL] Configured port: {self.port}")
         logger.info(f"[SERIAL] Baud rate: {self.baud}")
         logger.info(f"[SERIAL] Attempting connection to Arduino UNO...")

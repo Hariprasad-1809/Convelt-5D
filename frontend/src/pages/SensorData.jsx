@@ -125,7 +125,7 @@ export default function SensorData() {
               ARDUINO UNO {isArduinoConnected ? 'CONNECTED' : 'DISCONNECTED'}
             </div>
             <div style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)' }}>
-              {hardwareStatus?.port || 'COM4'} @ {hardwareStatus?.baud || 9600} Baud · USB Serial Gateway
+              {hardwareStatus?.port || 'COM5'} @ {hardwareStatus?.baud || 9600} Baud · USB Serial Gateway
             </div>
           </div>
         </div>
@@ -173,7 +173,7 @@ export default function SensorData() {
         <div className="section-header" style={{ marginBottom: '12px' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
             <span style={{ display: 'inline-block', width: 8, height: 8, borderRadius: '50%', background: isArduinoConnected ? 'var(--status-normal)' : 'var(--status-high)' }} />
-            <span className="section-title">Arduino UNO Live Hardware Telemetry & Serial Monitor Stream (COM4)</span>
+            <span className="section-title">Arduino UNO Live Hardware Telemetry & Serial Monitor Stream ({hardwareStatus?.port || 'COM5'})</span>
           </div>
           <span style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)' }}>
             Real-Time USB Gateway Stream
@@ -231,7 +231,7 @@ export default function SensorData() {
         >
           {rawSerialLogs.length === 0 ? (
             <div style={{ color: 'var(--text-muted)', fontStyle: 'italic' }}>
-              Waiting for incoming serial telemetry frames from COM4...
+              Waiting for incoming serial telemetry frames from {hardwareStatus?.port || 'COM5'}...
             </div>
           ) : (
             rawSerialLogs.map((logLine, idx) => (
