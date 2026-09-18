@@ -38,6 +38,8 @@ export default function VisionResultPanel({
 
   const isMotorRunning = hardwareStatus.motor_running;
   const isStopTriggered = visionData.motor_stop_triggered || (label === 'DAMAGE' && !isMotorRunning);
+  const isHardwareConfirmed = visionData.motor_stop_confirmed || (hardwareStatus.motor_running === false && isStopTriggered);
+  const cmdStatus = visionData.motor_command_status || (isStopTriggered ? 'CONFIRMED' : 'IDLE');
 
   const handleResume = async () => {
     if (!resumeMotor) return;
@@ -286,7 +288,7 @@ export default function VisionResultPanel({
               <AlertOctagon size={24} />
             </div>
             <div>
-              <div style={{ fontSize: '1rem', fontWeight: 700, color: '#fca5a5', display: 'flex', alignItems: 'center', gap: '8px' }}>
+              <div style={{ fontSize: '1rem', fontWeight: 700, color: '#fca5a5', display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: '8px' }}>
                 <span>🚨 DAMAGED JOINT DETECTED ON {jointId}</span>
                 <span
                   style={{
@@ -300,9 +302,40 @@ export default function VisionResultPanel({
                 >
                   MOTOR INTERLOCK TRIPPED
                 </span>
+                {isHardwareConfirmed ? (
+                  <span
+                    style={{
+                      fontSize: '11px',
+                      padding: '2px 8px',
+                      borderRadius: '4px',
+                      background: 'rgba(34, 197, 94, 0.2)',
+                      border: '1px solid rgba(34, 197, 94, 0.4)',
+                      color: '#4ade80',
+                      fontWeight: 700,
+                    }}
+                  >
+                    ✔ HARDWARE STOP CONFIRMED
+                  </span>
+                ) : cmdStatus === 'SENT' ? (
+                  <span
+                    style={{
+                      fontSize: '11px',
+                      padding: '2px 8px',
+                      borderRadius: '4px',
+                      background: 'rgba(251, 191, 36, 0.2)',
+                      border: '1px solid rgba(251, 191, 36, 0.4)',
+                      color: '#fbbf24',
+                      fontWeight: 700,
+                    }}
+                  >
+                    ⏳ STOP DISPATCHED (AWAITING ACK)
+                  </span>
+                ) : null}
               </div>
               <div style={{ fontSize: '0.85rem', color: '#fecaca', marginTop: '2px' }}>
-                Conveyor belt motor automatically stopped by vision safety engine. Inspect joint <strong>{jointId}</strong> before resuming conveyor operation.
+                {isHardwareConfirmed
+                  ? `Arduino confirmed 'COMMAND RECEIVED: STOP' (Motor STOPPED). Inspect joint ${jointId} before resuming conveyor.`
+                  : `STOP signal transmitted over serial to Arduino UNO. Awaiting hardware confirmation loop...`}
               </div>
             </div>
           </div>

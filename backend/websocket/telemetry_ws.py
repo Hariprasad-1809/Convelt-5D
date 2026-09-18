@@ -60,6 +60,27 @@ def broadcast_telemetry_sync(loop: asyncio.AbstractEventLoop, payload: dict):
 async def websocket_telemetry_endpoint(websocket: WebSocket):
     await manager.connect(websocket)
     try:
+        # Immediately push initial hardware telemetry or connection status to the newly connected client
+        try:
+            from backend.services.serial_service import serial_service
+            if serial_service.latest_telemetry:
+                await websocket.send_text(json.dumps(serial_service.latest_telemetry, default=str))
+            else:
+                from datetime import datetime, timezone
+                await websocket.send_text(json.dumps({
+                    "type": "connection_status",
+                    "device_id": serial_service.device_id,
+                    "port": serial_service.port,
+                    "baud": serial_service.baud,
+                    "connection_status": serial_service.connection_status,
+                    "serial_status": serial_service.connection_status,
+                    "websocket_status": "CONNECTED",
+                    "message": f"Connected to gateway on {serial_service.port}",
+                    "timestamp": datetime.now(timezone.utc).isoformat()
+                }, default=str))
+        except Exception as init_err:
+            logger.debug(f"[WS] Non-fatal error sending initial telemetry frame: {init_err}")
+
         while True:
             # Keep connection alive & handle incoming client pings
             data = await websocket.receive_text()

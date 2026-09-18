@@ -72,31 +72,34 @@ async def get_vision_stream():
 @router.post("/resume")
 def resume_motor():
     """
-    Sends RESUME command to Arduino conveyor motor and resets the damage auto-stop interlock guard.
+    Sends b'RESUME\\n' command to Arduino conveyor motor and resets the damage auto-stop interlock guard.
     """
+    sent = vision_service.resume_conveyor()
     from backend.services.serial_service import serial_service
-    sent = serial_service.send_command("RESUME")
-    vision_service.reset_stop_guard()
     return {
         "status": "ok" if sent else "error",
         "command": "RESUME",
         "serial_sent": sent,
+        "motor_stop_confirmed": serial_service.motor_stop_confirmed,
+        "motor_command_status": serial_service.last_command_status,
         "motor_stop_triggered": False,
-        "message": "Conveyor motor resume signal sent to Arduino" if sent else "Failed to send RESUME signal over serial"
+        "message": "Conveyor motor resume signal confirmed by Arduino" if sent else "Failed to send RESUME signal over serial"
     }
 
 
 @router.post("/stop")
 def stop_motor():
     """
-    Manual emergency stop for Arduino conveyor motor.
+    Manual emergency stop for Arduino conveyor motor (sends b'STOP\\n').
     """
     from backend.services.serial_service import serial_service
-    sent = serial_service.send_command("STOP")
+    sent = serial_service.send_command("STOP", wait_for_ack=False)
     return {
         "status": "ok" if sent else "error",
         "command": "STOP",
         "serial_sent": sent,
+        "motor_stop_confirmed": serial_service.motor_stop_confirmed,
+        "motor_command_status": serial_service.last_command_status,
         "message": "Conveyor motor stop signal sent to Arduino" if sent else "Failed to send STOP signal over serial"
     }
 

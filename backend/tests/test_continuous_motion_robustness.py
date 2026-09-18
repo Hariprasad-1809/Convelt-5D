@@ -260,6 +260,144 @@ def test_no_zone_flicker_or_duplicate_track_ids():
     print("  [PASS] Test 4: Zero Zone Flicker & Zero Duplicate Track IDs Verified")
 
 
+def test_early_strong_damage_finalizes_during_inspecting():
+    """
+    ISSUE 1 & 2 VERIFICATION:
+    A damaged joint with 5 consecutive high-confidence DAMAGE frames (p_d >= 0.70)
+    must lock FINAL: DAMAGE immediately while STILL inside the inspection zone (INSPECTING),
+    without waiting for the track to reach PASSED.
+    """
+    engine = JointGuardStateEngine(target_frames=5, damage_thresh=0.70, healthy_thresh=0.70)
+    frame = np.ones((480, 640, 3), dtype=np.uint8) * 150
+    yolo_model = DynamicDummyYOLO(lambda idx, crop: (0.10, 0.90))
+
+    res_history = []
+    # Feed 5 frames inside the inspection zone
+    for i in range(5):
+        x = 200 + i * 10
+        r = engine.process_frame(
+            frame,
+            joint_detected=True,
+            raw_bbox_full=(x, 200, 100, 80),
+            in_zone=True,
+            yolo_model=yolo_model,
+            no_quality_check=True
+        )
+        res_history.append(r)
+
+    # CRITICAL CHECK: At frame 5, still in_zone=True, verdict MUST be early-finalized as DAMAGE!
+    fifth_res = res_history[4]
+    assert fifth_res["valid_frame_count"] == 5, f"Expected 5 valid frames, got {fifth_res['valid_frame_count']}"
+    assert fifth_res["is_early_finalized"] is True, "Expected is_early_finalized to be True at frame 5"
+    assert fifth_res["final_label"] == "DAMAGE", f"Expected FINAL: DAMAGE, got {fifth_res['final_label']}"
+    assert fifth_res["final_confidence"] >= 0.70, f"Expected conf >= 0.70, got {fifth_res['final_confidence']}"
+    assert fifth_res["inspection_state"] == "CONFIRMED", f"Expected CONFIRMED, got {fifth_res['inspection_state']}"
+
+    # Verify that the verdict stays permanently locked as DAMAGE across further in-zone frames
+    for i in range(5, 10):
+        x = 200 + i * 10
+        r_cont = engine.process_frame(
+            frame,
+            joint_detected=True,
+            raw_bbox_full=(x, 200, 100, 80),
+            in_zone=True,
+            yolo_model=yolo_model,
+            no_quality_check=True
+        )
+        assert r_cont["final_label"] == "DAMAGE", f"Verdict flipped: {r_cont['final_label']}"
+        assert r_cont["is_early_finalized"] is True
+
+    print("  [PASS] Test 5: Early Strong DAMAGE Finalizes During INSPECTING (Real-Time Motor Interlock Ready)")
+
+
+def test_majority_damage_never_produces_final_healthy():
+    """
+    ISSUE 2 CONTRADICTION VERIFICATION:
+    Even when early edge frames exhibit high HEALTHY confidence (e.g. 2 frames of 0.99 Healthy),
+    if the majority of frames across the transit are DAMAGE (e.g. 3 frames of 0.70 Damage),
+    the final verdict must NEVER contradict the majority vote and output FINAL: HEALTHY.
+    """
+    engine = JointGuardStateEngine(target_frames=5, damage_thresh=0.70, healthy_thresh=0.70)
+    frame = np.ones((480, 640, 3), dtype=np.uint8) * 150
+
+    def skewed_schedule(idx, crop):
+        if idx < 2:
+            # 2 edge frames with very high healthy confidence
+            return (0.99, 0.01)
+        else:
+            # 3 frames with genuine damage detection
+            return (0.30, 0.70)
+
+    yolo_model = DynamicDummyYOLO(skewed_schedule)
+
+    res_list = []
+    for i in range(5):
+        x = 200 + i * 10
+        r = engine.process_frame(
+            frame,
+            joint_detected=True,
+            raw_bbox_full=(x, 200, 100, 80),
+            in_zone=True,
+            yolo_model=yolo_model,
+            no_quality_check=True
+        )
+        res_list.append(r)
+
+    # Frame 5: 3 DAMAGE vs 2 HEALTHY -> Majority is DAMAGE!
+    final_res = res_list[4]
+    assert final_res["final_label"] != "HEALTHY", "CONTRADICTION BUG: Majority is DAMAGE but FINAL was HEALTHY!"
+    assert final_res["final_label"] == "DAMAGE", f"Expected FINAL: DAMAGE, got {final_res['final_label']}"
+
+    # Now transit to PASSED outside zone
+    for i in range(5):
+        r_exit = engine.process_frame(
+            frame,
+            joint_detected=True,
+            raw_bbox_full=(450 + i * 10, 200, 100, 80),
+            in_zone=False,
+            yolo_model=yolo_model,
+            no_quality_check=True
+        )
+
+    assert r_exit["inspection_state"] == "PASSED"
+    assert r_exit["final_label"] == "DAMAGE", f"Expected PASSED FINAL: DAMAGE, got {r_exit['final_label']}"
+    print("  [PASS] Test 6: Majority DAMAGE Never Produces Contradictory FINAL: HEALTHY")
+
+
+def test_re_identification_prevents_track_churn_on_temporary_dropout():
+    """
+    ISSUE 3 TRACK FRAGMENTATION VERIFICATION:
+    If a joint suffers detection dropout or momentary loss and re-appears in the same area,
+    re-identification should preserve the existing joint track ID and its accumulated samples,
+    preventing rapid churning (J01 -> J02 -> J03...).
+    """
+    engine = JointGuardStateEngine(target_frames=5, track_lost_timeout=2.0)
+    frame = np.ones((480, 640, 3), dtype=np.uint8) * 150
+    yolo_model = DynamicDummyYOLO(lambda idx, crop: (0.15, 0.85))
+
+    observed_ids = []
+
+    # 1. First 4 frames detected
+    for i in range(4):
+        x = 200 + i * 10
+        r = engine.process_frame(frame, joint_detected=True, raw_bbox_full=(x, 200, 100, 80), in_zone=True, yolo_model=yolo_model, no_quality_check=True)
+        observed_ids.append(r["joint_id"])
+
+    # 2. 8 frames of complete detection dropout (e.g. camera glitch or specular blackout)
+    for _ in range(8):
+        engine.process_frame(frame, joint_detected=False, raw_bbox_full=None, in_zone=False, yolo_model=yolo_model, no_quality_check=True)
+
+    # 3. Detection re-appears at nearby downstream position (x=260)
+    r_reappear = engine.process_frame(frame, joint_detected=True, raw_bbox_full=(260, 200, 100, 80), in_zone=True, yolo_model=yolo_model, no_quality_check=True)
+    observed_ids.append(r_reappear["joint_id"])
+
+    # Must be re-identified as the SAME joint (J01), preserving previous sample accumulation
+    assert r_reappear["joint_id"] == "J01", f"Track fragmented! Expected J01, got {r_reappear['joint_id']}"
+    assert r_reappear["valid_frame_count"] == 5, f"Expected 5 accumulated samples, got {r_reappear['valid_frame_count']}"
+    assert set(observed_ids) == {"J01"}, f"Multiple track IDs observed: {set(observed_ids)}"
+    print("  [PASS] Test 7: Re-Identification Prevents Track Churn on Temporary Dropout")
+
+
 if __name__ == "__main__":
     print("=" * 70)
     print("  RUNNING JOINTGUARD CONTINUOUS MOTION ROBUSTNESS TEST SUITE")
@@ -268,6 +406,9 @@ if __name__ == "__main__":
     test_healthy_joint_transit_locks_healthy()
     test_no_aspect_ratio_classification_gap_during_entry()
     test_no_zone_flicker_or_duplicate_track_ids()
+    test_early_strong_damage_finalizes_during_inspecting()
+    test_majority_damage_never_produces_final_healthy()
+    test_re_identification_prevents_track_churn_on_temporary_dropout()
     print("=" * 70)
-    print("  ALL 4 ROBUST STATE MACHINE TESTS PASSED SUCCESSFULLY!")
+    print("  ALL 7 ROBUST STATE MACHINE TESTS PASSED SUCCESSFULLY!")
     print("=" * 70)

@@ -33,8 +33,8 @@ class TestMotorStopOnDamage(unittest.TestCase):
     def tearDown(self):
         vision_service.reset_stop_guard()
 
-    def test_serial_send_command_success(self):
-        """Verify send_command writes newline-terminated bytes and flushes."""
+    def test_serial_send_command_exact_bytes_and_flush(self):
+        """Verify send_command writes exact newline-terminated byte strings (b'STOP\\n', b'RESUME\\n') and flushes."""
         mock_conn = MagicMock()
         with patch.object(serial_service, "_serial_conn", mock_conn):
             # Test STOP
@@ -50,11 +50,45 @@ class TestMotorStopOnDamage(unittest.TestCase):
             mock_conn.write.assert_called_with(b"RESUME\n")
             mock_conn.flush.assert_called_once()
 
+    def test_hardware_confirmation_feedback_loop(self):
+        """
+        Verify that reading Arduino's confirmation strings sets hardware-confirmed status:
+        - 'COMMAND RECEIVED: STOP' / 'Motor STOPPED' -> motor_stop_confirmed = True
+        - 'COMMAND RECEIVED: RESUME' / 'Motor STARTED' -> motor_stop_confirmed = False
+        """
+        serial_service.motor_stop_confirmed = False
+        serial_service.last_command_status = "IDLE"
+
+        # 1. Simulate incoming STOP confirmation line from Arduino
+        serial_service._check_line_for_ack("COMMAND RECEIVED: STOP")
+        self.assertTrue(serial_service.motor_stop_confirmed)
+        self.assertEqual(serial_service.last_command_status, "CONFIRMED")
+        self.assertEqual(serial_service.last_command_ack, "STOP")
+
+        # 2. Simulate incoming Motor STOPPED line
+        serial_service.motor_stop_confirmed = False
+        serial_service._check_line_for_ack("Motor STOPPED")
+        self.assertTrue(serial_service.motor_stop_confirmed)
+        self.assertEqual(serial_service.last_command_status, "CONFIRMED")
+
+        # 3. Simulate incoming RESUME confirmation line from Arduino
+        serial_service._check_line_for_ack("COMMAND RECEIVED: RESUME")
+        self.assertFalse(serial_service.motor_stop_confirmed)
+        self.assertEqual(serial_service.last_command_status, "CONFIRMED")
+        self.assertEqual(serial_service.last_command_ack, "RESUME")
+
+        # 4. Simulate incoming Motor STARTED line
+        serial_service.motor_stop_confirmed = True
+        serial_service._check_line_for_ack("Motor STARTED")
+        self.assertFalse(serial_service.motor_stop_confirmed)
+        self.assertEqual(serial_service.last_command_status, "CONFIRMED")
+
     def test_serial_send_command_disconnected(self):
         """Verify send_command returns False cleanly when port is disconnected."""
         with patch.object(serial_service, "_serial_conn", None):
             result = serial_service.send_command("STOP")
             self.assertFalse(result)
+            self.assertEqual(serial_service.last_command_status, "FAILED")
 
     def test_serial_send_command_exception_handled(self):
         """Verify exceptions during serial write are caught without raising."""
@@ -63,6 +97,7 @@ class TestMotorStopOnDamage(unittest.TestCase):
         with patch.object(serial_service, "_serial_conn", mock_conn):
             result = serial_service.send_command("STOP")
             self.assertFalse(result)
+            self.assertEqual(serial_service.last_command_status, "FAILED")
 
     def test_vision_damage_triggers_motor_stop_once(self):
         """
@@ -167,7 +202,7 @@ class TestMotorStopOnDamage(unittest.TestCase):
             self.assertEqual(data["status"], "ok")
             self.assertEqual(data["command"], "RESUME")
             self.assertFalse(data["motor_stop_triggered"])
-            mock_cmd.assert_called_with("RESUME")
+            mock_cmd.assert_called_with("RESUME", wait_for_ack=True)
 
             # Test POST /api/v1/vision/stop
             mock_cmd.reset_mock()
@@ -176,7 +211,22 @@ class TestMotorStopOnDamage(unittest.TestCase):
             data_stop = res_stop.json()
             self.assertEqual(data_stop["status"], "ok")
             self.assertEqual(data_stop["command"], "STOP")
-            mock_cmd.assert_called_with("STOP")
+            mock_cmd.assert_called_with("STOP", wait_for_ack=False)
+
+    def test_vision_resume_conveyor_method(self):
+        """Verify vision_service.resume_conveyor() sends b'RESUME\\n', receives ACK, and resets stop guard."""
+        mock_conn = MagicMock()
+        mock_conn.readline.return_value = b"COMMAND RECEIVED: RESUME\n"
+        with patch.object(serial_service, "_serial_conn", mock_conn):
+            vision_service.motor_stop_triggered = True
+            vision_service.stopped_damage_joint_ids.add("J01")
+
+            success = vision_service.resume_conveyor()
+            self.assertTrue(success)
+            mock_conn.write.assert_called_with(b"RESUME\n")
+            mock_conn.flush.assert_called_once()
+            self.assertFalse(vision_service.motor_stop_triggered)
+            self.assertEqual(len(vision_service.stopped_damage_joint_ids), 0)
 
     def test_viewer_count_and_stream_encoding_gate(self):
         """Verify viewer count tracking and gating of JPEG encoding."""

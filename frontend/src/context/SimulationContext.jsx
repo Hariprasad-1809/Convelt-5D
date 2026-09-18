@@ -374,9 +374,9 @@ export function SimulationProvider({ children }) {
           let currentTemp = sensorData?.temperature ?? j.temperature ?? prevJoint.temperature ?? 36.5;
           let currentVib = sensorData?.vibration ?? j.vibration ?? prevJoint.vibration ?? 1.5;
 
-          if (jid === 'J01' && (hardwareStatus?.connection_status === 'CONNECTED' || hardwareStatus?.serial_status === 'CONNECTED') && hardwareStatus?.temperature != null) {
-            currentTemp = hardwareStatus.temperature;
-            currentVib = hardwareStatus.vibration ?? currentVib;
+          if (jid === 'J01' && (hardwareStatus?.connection_status === 'CONNECTED' || hardwareStatus?.serial_status === 'CONNECTED')) {
+            if (hardwareStatus?.temperature != null) currentTemp = hardwareStatus.temperature;
+            if (hardwareStatus?.vibration != null) currentVib = hardwareStatus.vibration;
           }
 
           const currentRisk = j.risk_level || 'LOW';
