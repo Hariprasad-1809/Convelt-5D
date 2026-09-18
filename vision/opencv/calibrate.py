@@ -31,7 +31,7 @@ def parse_args():
     parser.add_argument(
         "--source",
         type=str,
-        default="0",
+        default="1",
         help="Input source: webcam index (e.g. 0 or 1), video file, or image path"
     )
     parser.add_argument(
