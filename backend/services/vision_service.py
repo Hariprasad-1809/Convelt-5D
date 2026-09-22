@@ -105,6 +105,33 @@ def find_joint_in_roi(
         if is_side_rail:
             continue
 
+        # Reject static background boundary artifacts along the bottom/top belt border
+        # (e.g. bright contrast edge between dark rubber belt and light floor/mount behind it)
+        is_bottom_background_edge = (
+            (by + bh >= h - 4) or
+            (by >= int(0.78 * h) and bh < int(0.25 * h)) or
+            (by + bh >= int(0.88 * h) and bw > 2.5 * bh)
+        )
+        if is_bottom_background_edge:
+            continue
+
+        is_top_background_edge = (
+            (by <= 3) and (bh < int(0.20 * h) or by + bh <= int(0.25 * h))
+        )
+        if is_top_background_edge:
+            continue
+
+        # Dual-edge context check for candidates in lower portion of ROI:
+        # A real metallic joint is bounded by dark belt rubber on both sides (above and below).
+        # A static background transition at the floor/mount lacks a dark rubber boundary below it.
+        if by >= int(0.65 * h):
+            below_band = v_chan[by + bh : min(h, by + bh + 10), bx : bx + bw]
+            if below_band.size > 0:
+                below_v_mean = float(np.mean(below_band))
+                if below_v_mean > 145.0:
+                    # Below region is bright floor/mount, not dark rubber belt
+                    continue
+
         cand_v = v_chan[by:by+bh, bx:bx+bw]
         cand_s = s_chan[by:by+bh, bx:bx+bw]
         cand_metallic = np.count_nonzero((cand_v >= 175) & (cand_s <= 75))
@@ -179,13 +206,13 @@ def is_in_inner_inspection_zone(
         xmin = roi_w * 0.03
         xmax = roi_w * 0.97
         ymin = roi_h * 0.04
-        ymax = roi_h * 0.96
+        ymax = roi_h * 0.88
     else:
         # Stricter entry boundary
         xmin = roi_w * 0.08
         xmax = roi_w * 0.92
         ymin = roi_h * 0.10
-        ymax = roi_h * 0.90
+        ymax = roi_h * 0.82
 
     return (xmin <= cx <= xmax) and (ymin <= cy <= ymax)
 
@@ -306,6 +333,7 @@ class JointTrack:
         # Early-exit & rolling finalization lock
         self.is_early_finalized: bool = False
         self.finalized_at_state: Optional[str] = None
+        self.finalized_via: str = "none"  # "early-lock-lifetime-average", "early-lock-recent-window", "fallback-at-PASSED", "none"
 
         # Robust State Machine Hysteresis & Debounce tracking
         self.is_inside_zone: bool = False
@@ -358,6 +386,7 @@ class JointGuardStateEngine:
         save_debug_crops: bool = False,
         debug_crops_dir: Optional[str] = None,
         debounce_outside_frames: int = 5,
+        lost_bbox_grace_frames: int = 2,
     ):
         self.target_frames = target_frames
         self.min_sharpness = min_sharpness
@@ -370,6 +399,7 @@ class JointGuardStateEngine:
         self.save_debug_crops = save_debug_crops
         self.debug_crops_dir = debug_crops_dir or os.path.join(PROJECT_ROOT, "check_yolo", "debug_crops")
         self.debounce_outside_frames = debounce_outside_frames
+        self.lost_bbox_grace_frames = lost_bbox_grace_frames
 
         self.joint_counter = 1
         self.active_track: Optional[JointTrack] = None
@@ -438,6 +468,9 @@ class JointGuardStateEngine:
             print(f"[CONSISTENCY OVERRIDE] Joint {track.joint_id}: majority was DAMAGE ({damage_count} vs {healthy_count}), overriding contradictory HEALTHY to DAMAGE!")
             track.confirmed_label = "DAMAGE"
             track.confirmed_confidence = avg_d
+
+        track.finalized_via = "fallback-at-PASSED"
+        print(f"[FINAL VERDICT] Joint {track.joint_id} finalized via fallback-at-PASSED: {track.confirmed_label} ({track.confirmed_confidence*100:.1f}%)")
 
     def process_frame(
         self,
@@ -560,6 +593,7 @@ class JointGuardStateEngine:
 
         if not joint_detected or not track.is_inside_zone:
             current_lbl = "NOT VISIBLE" if not joint_detected else "OUTSIDE_ZONE"
+            visible_bbox = track.smoothed_bbox if (joint_detected or track.consecutive_lost_frames <= self.lost_bbox_grace_frames) else None
             return {
                 "joint_id": track.joint_id,
                 "current_label": current_lbl,
@@ -579,9 +613,11 @@ class JointGuardStateEngine:
                 "is_early_finalized": track.is_early_finalized,
                 "total_frames_seen": track.total_frames_seen,
                 "total_frames_lost": track.total_frames_lost,
-                "smoothed_bbox": track.smoothed_bbox,
+                "consecutive_lost_frames": track.consecutive_lost_frames,
+                "smoothed_bbox": visible_bbox,
                 "timestamp": timestamp,
                 "reason_for_final_change": reason if reason != "no-change" else ("temporarily-lost" if not joint_detected else "outside-zone"),
+                "finalized_via": getattr(track, "finalized_via", "none"),
             }
 
         # 3. EXTRACT STABILIZED CROP USING SMOOTHED BBOX (WITH ASPECT-RATIO CLAMPING)
@@ -672,26 +708,54 @@ class JointGuardStateEngine:
         damage_count = sum(1 for s in track.accumulated_samples if s[0] == "DAMAGE")
         healthy_count = sum(1 for s in track.accumulated_samples if s[0] == "HEALTHY")
 
+        # Sliding window evaluation (last 5-8 valid frames)
+        # Allows quick recovery from noisy/ambiguous starts once the joint is clearly visible
+        recent_window_size = min(8, max(5, self.target_frames))
+        recent_samples = track.accumulated_samples[-recent_window_size:] if n_samples >= 5 else []
+        recent_avg_d = float(np.mean([s[2] for s in recent_samples])) if recent_samples else 0.0
+        recent_damage_count = sum(1 for s in recent_samples if s[0] == "DAMAGE")
+        recent_healthy_count = sum(1 for s in recent_samples if s[0] == "HEALTHY")
+
         # If already early-finalized as DAMAGE, maintain locked verdict
         if track.is_early_finalized and track.confirmed_label == "DAMAGE":
-            track.confirmed_confidence = avg_d
+            track.confirmed_confidence = max(avg_d, recent_avg_d)
             track.inspection_state = "CONFIRMED"
         elif n_samples >= min(3, self.target_frames):
             # Evaluate Early Finalization during INSPECTING
-            # Asymmetric safety policy: Fast-lock DAMAGE once confident threshold and samples are met
-            is_confident_damage = (
+            # Path A: Full lifetime average crosses damage threshold
+            is_confident_damage_lifetime = (
                 (n_samples >= self.target_frames and damage_count >= 3 and avg_d >= self.damage_thresh) or
                 (damage_count >= 4 and avg_d >= self.damage_thresh) or
                 (damage_count >= 3 and avg_d >= 0.85 and healthy_count == 0)
             )
 
-            if is_confident_damage:
+            # Path B: Recent sliding window (last 5-8 valid frames) crosses damage threshold
+            # Resolves Issue 1: recovers quickly from noisy early frames without waiting for PASSED
+            is_confident_damage_recent = (
+                len(recent_samples) >= 5 and
+                recent_damage_count >= 3 and
+                recent_damage_count > recent_healthy_count and
+                recent_avg_d >= self.damage_thresh
+            )
+
+            if is_confident_damage_lifetime:
                 track.confirmed_label = "DAMAGE"
                 track.confirmed_confidence = avg_d
                 track.is_early_finalized = True
                 track.finalized_at_state = "INSPECTING"
+                track.finalized_via = "early-lock-lifetime-average"
                 track.inspection_state = "CONFIRMED"
-                reason = "early-finalized-damage"
+                reason = "early-finalized-damage-lifetime"
+                print(f"[EARLY FINAL VERDICT] Joint {track.joint_id} early-finalized via lifetime average: DAMAGE ({avg_d*100:.1f}%)")
+            elif is_confident_damage_recent:
+                track.confirmed_label = "DAMAGE"
+                track.confirmed_confidence = recent_avg_d
+                track.is_early_finalized = True
+                track.finalized_at_state = "INSPECTING"
+                track.finalized_via = "early-lock-recent-window"
+                track.inspection_state = "CONFIRMED"
+                reason = "early-finalized-damage-recent-window"
+                print(f"[EARLY FINAL VERDICT] Joint {track.joint_id} early-finalized via recent sliding window ({len(recent_samples)} frames): DAMAGE ({recent_avg_d*100:.1f}%)")
             else:
                 # Normal rolling candidate evaluation
                 if damage_count >= 3 and avg_d >= self.damage_thresh:
@@ -760,6 +824,7 @@ class JointGuardStateEngine:
             self._print_5frame_debug_output(track)
             self.printed_debug_for_track[track.joint_id] = True
 
+        visible_bbox = track.smoothed_bbox if (joint_detected or track.consecutive_lost_frames <= self.lost_bbox_grace_frames) else None
         res = {
             "joint_id": track.joint_id,
             "current_label": current_label,
@@ -779,9 +844,11 @@ class JointGuardStateEngine:
             "is_early_finalized": track.is_early_finalized,
             "total_frames_seen": track.total_frames_seen,
             "total_frames_lost": track.total_frames_lost,
-            "smoothed_bbox": track.smoothed_bbox,
+            "consecutive_lost_frames": track.consecutive_lost_frames,
+            "smoothed_bbox": visible_bbox,
             "timestamp": timestamp,
             "reason_for_final_change": reason,
+            "finalized_via": getattr(track, "finalized_via", "none"),
         }
 
         if self.jsonl_path:
@@ -1212,10 +1279,10 @@ class VisionService:
             iz_x1 = x1 + int(roi_w * 0.08)
             iz_y1 = y1 + int(roi_h * 0.10)
             iz_x2 = x1 + int(roi_w * 0.92)
-            iz_y2 = y1 + int(roi_h * 0.90)
+            iz_y2 = y1 + int(roi_h * 0.82)
             cv2.rectangle(vis_frame, (iz_x1, iz_y1), (iz_x2, iz_y2), (0, 255, 255), 1)
 
-            if eval_res["smoothed_bbox"] is not None:
+            if eval_res["smoothed_bbox"] is not None and eval_res.get("consecutive_lost_frames", 0) <= 2:
                 bx, by, bw, bh = eval_res["smoothed_bbox"]
                 color = (0, 255, 0) if final_label == "HEALTHY" else ((0, 0, 255) if final_label == "DAMAGE" else (0, 165, 255))
                 cv2.rectangle(vis_frame, (bx, by), (bx + bw, by + bh), color, 2)
