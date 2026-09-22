@@ -73,35 +73,35 @@ function JointQuickModal({ jointId, joints, onClose, onInspect }) {
         </div>
 
         {/* 4 Sensor Channels */}
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: '8px' }}>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: '10px' }}>
           {/* Temperature */}
-          <div style={{ padding: '10px', background: 'var(--bg-elevated)', borderRadius: 'var(--radius)', textAlign: 'center' }}>
-            <div style={{ fontSize: '9px', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.07em', marginBottom: 4 }}>
+          <div style={{ padding: '12px', background: 'var(--bg-elevated)', borderRadius: 'var(--radius)', textAlign: 'center' }}>
+            <div style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.07em', marginBottom: 4, fontWeight: 600 }}>
               Temp · DS18B20 (10%)
             </div>
-            <div style={{ fontSize: 'var(--text-lg)', fontFamily: 'var(--font-mono)', fontWeight: 700, color: 'var(--text-primary)' }}>
+            <div style={{ fontSize: 'var(--text-xl)', fontFamily: 'var(--font-mono)', fontWeight: 700, color: 'var(--text-primary)' }}>
               {joint.temperature.toFixed(1)}°C
             </div>
-            <div style={{ marginTop: 4 }}><StatusBadge status={tempSt} size="sm" /></div>
+            <div style={{ marginTop: 6 }}><StatusBadge status={tempSt} size="sm" /></div>
           </div>
 
           {/* Acceleration */}
-          <div style={{ padding: '10px', background: 'var(--bg-elevated)', borderRadius: 'var(--radius)', textAlign: 'center' }}>
-            <div style={{ fontSize: '9px', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.07em', marginBottom: 4 }}>
+          <div style={{ padding: '12px', background: 'var(--bg-elevated)', borderRadius: 'var(--radius)', textAlign: 'center' }}>
+            <div style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.07em', marginBottom: 4, fontWeight: 600 }}>
               Accel · MPU6050 (20%)
             </div>
-            <div style={{ fontSize: 'var(--text-lg)', fontFamily: 'var(--font-mono)', fontWeight: 700, color: 'var(--text-primary)' }}>
+            <div style={{ fontSize: 'var(--text-xl)', fontFamily: 'var(--font-mono)', fontWeight: 700, color: 'var(--text-primary)' }}>
               {joint.vibration.toFixed(2)} m/s²
             </div>
-            <div style={{ marginTop: 4 }}><StatusBadge status={accelSt} size="sm" /></div>
+            <div style={{ marginTop: 6 }}><StatusBadge status={accelSt} size="sm" /></div>
           </div>
 
           {/* Magnetic / Hall */}
-          <div style={{ padding: '10px', background: 'var(--bg-elevated)', borderRadius: 'var(--radius)', textAlign: 'center' }}>
-            <div style={{ fontSize: '9px', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.07em', marginBottom: 4 }}>
+          <div style={{ padding: '12px', background: 'var(--bg-elevated)', borderRadius: 'var(--radius)', textAlign: 'center' }}>
+            <div style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.07em', marginBottom: 4, fontWeight: 600 }}>
               Magnetic · A3144 (30%)
             </div>
-            <div style={{ fontSize: 'var(--text-base)', fontFamily: 'var(--font-mono)', fontWeight: 700, color: joint.hall_event ? 'var(--accent)' : 'var(--text-secondary)' }}>
+            <div style={{ fontSize: 'var(--text-lg)', fontFamily: 'var(--font-mono)', fontWeight: 700, color: joint.hall_event ? 'var(--accent)' : 'var(--text-secondary)' }}>
               {joint.hall_event ? 'PULSE' : 'IDLE'}
             </div>
             <div style={{ height: '100%', width: `${score}%`, background: sc, borderRadius: 2 }} />

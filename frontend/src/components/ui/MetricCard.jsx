@@ -41,15 +41,15 @@ export default function MetricCard({
         {showStatus && status && <StatusBadge status={status} size="sm" />}
       </div>
 
-      <div style={{ display: 'flex', alignItems: 'baseline', gap: '6px' }}>
-        <span style={{ fontSize: 'var(--text-2xl)', fontWeight: 600, fontFamily: 'var(--font-mono)', color: 'var(--text-primary)' }}>
+      <div style={{ display: 'flex', alignItems: 'baseline', gap: '8px', margin: '4px 0' }}>
+        <span style={{ fontSize: 'var(--text-2xl)', fontWeight: 700, fontFamily: 'var(--font-mono)', color: 'var(--text-primary)', letterSpacing: '-0.02em' }}>
           {typeof value === 'number' ? value.toFixed(value % 1 === 0 ? 0 : 1) : value}
         </span>
-        <span style={{ fontSize: 'var(--text-sm)', color: 'var(--text-muted)' }}>{unit}</span>
+        <span style={{ fontSize: 'var(--text-base)', fontWeight: 600, color: 'var(--text-muted)' }}>{unit}</span>
       </div>
 
       {subtext && (
-        <div style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)', marginTop: '4px' }}>
+        <div style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)', marginTop: '6px' }}>
           {subtext}
         </div>
       )}

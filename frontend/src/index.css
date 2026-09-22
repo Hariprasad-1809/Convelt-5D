@@ -48,14 +48,14 @@
   --font-sans: 'Inter', system-ui, -apple-system, sans-serif;
   --font-mono: 'JetBrains Mono', 'Courier New', monospace;
 
-  /* Font sizes — tuned for comfortable reading at laptop viewing distance */
-  --text-xs:   0.75rem;     /* 12px  — labels, badges, metadata */
-  --text-sm:   0.875rem;    /* 14px  — secondary text, table cells */
-  --text-base: 1rem;        /* 16px  — body, card content */
-  --text-lg:   1.125rem;    /* 18px  — subheadings, emphasis */
-  --text-xl:   1.375rem;    /* 22px  — page titles */
-  --text-2xl:  1.625rem;    /* 26px  — large readings */
-  --text-3xl:  2rem;        /* 32px  — hero values */
+  /* Font sizes — scaled up for clear industrial & real-time monitoring visibility */
+  --text-xs:   0.85rem;     /* ~14.5px — labels, badges, metadata */
+  --text-sm:   0.95rem;     /* ~16.1px — secondary text, table cells */
+  --text-base: 1.05rem;     /* ~17.8px — body, card content */
+  --text-lg:   1.25rem;     /* ~21.2px — subheadings, emphasis */
+  --text-xl:   1.5rem;      /* ~25.5px — page titles */
+  --text-2xl:  2.25rem;     /* ~38.2px — real-time values & sensor readings */
+  --text-3xl:  2.85rem;     /* ~48.4px — hero values */
 
   /* Spacing */
   --space-1: 0.25rem;
@@ -98,7 +98,7 @@
 }
 
 html {
-  font-size: 16px;
+  font-size: 17px;
   -webkit-text-size-adjust: 100%;
 }
 

@@ -136,8 +136,7 @@ export default function CameraVision({ visionData, cameraStatus, activeJoint = '
 
         {/* Live Metrics Column */}
         <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
-          
-          {/* Classification Badge */}
+                   {/* Classification Badge */}
           <div style={{
             padding: '14px',
             borderRadius: '8px',
@@ -147,12 +146,12 @@ export default function CameraVision({ visionData, cameraStatus, activeJoint = '
             alignItems: 'center',
             gap: '12px'
           }}>
-            <BadgeIcon size={28} style={{ color: badge.color }} />
+            <BadgeIcon size={32} style={{ color: badge.color }} />
             <div>
-              <div style={{ fontSize: '0.75rem', color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+              <div style={{ fontSize: '0.85rem', color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '0.05em', fontWeight: 600 }}>
                 Classification
               </div>
-              <div style={{ fontSize: '1.25rem', fontWeight: 700, color: badge.color }}>
+              <div style={{ fontSize: '1.45rem', fontWeight: 800, color: badge.color }}>
                 {label}
               </div>
             </div>
@@ -160,25 +159,24 @@ export default function CameraVision({ visionData, cameraStatus, activeJoint = '
 
           {/* Confidence Metric */}
           <div style={{
-            padding: '10px 12px',
+            padding: '12px 14px',
             borderRadius: '8px',
             background: 'rgba(30, 41, 59, 0.6)',
             border: '1px solid #334155',
             display: 'flex',
-            justifyContent: 'space-between',
+            justifyContent: 'Space-between',
             alignItems: 'center'
           }}>
-            <span style={{ fontSize: '0.85rem', color: '#94a3b8' }}>Class Probabilities</span>
-            <span style={{ fontSize: '0.85rem', fontWeight: 700 }}>
+            <span style={{ fontSize: '0.95rem', color: '#94a3b8', fontWeight: 500 }}>Class Probabilities</span>
+            <span style={{ fontSize: '0.95rem', fontWeight: 700 }}>
               <span style={{ color: '#4ade80' }}>H: {visionData?.p_healthy != null ? (visionData.p_healthy * 100).toFixed(1) + '%' : '—'}</span> | {' '}
               <span style={{ color: '#f87171' }}>D: {visionData?.p_damage != null ? (visionData.p_damage * 100).toFixed(1) + '%' : '—'}</span>
             </span>
           </div>
 
-
           {/* Valid & Blurry Frames Metric */}
           <div style={{
-            padding: '10px 12px',
+            padding: '12px 14px',
             borderRadius: '8px',
             background: 'rgba(30, 41, 59, 0.6)',
             border: '1px solid #334155',
@@ -186,15 +184,15 @@ export default function CameraVision({ visionData, cameraStatus, activeJoint = '
             justifyContent: 'space-between',
             alignItems: 'center'
           }}>
-            <span style={{ fontSize: '0.85rem', color: '#94a3b8' }}>Sharp Frames (Blur Filter)</span>
-            <span style={{ fontSize: '0.9rem', fontWeight: 700, color: '#fbbf24' }}>
-              {visionData?.valid_frame_count ?? 0}/5 <span style={{ fontSize: '0.75rem', color: '#f87171' }}>({visionData?.rejected_blurry_count ?? 0} rej)</span>
+            <span style={{ fontSize: '0.95rem', color: '#94a3b8', fontWeight: 500 }}>Sharp Frames</span>
+            <span style={{ fontSize: '1rem', fontWeight: 700, color: '#fbbf24' }}>
+              {visionData?.valid_frame_count ?? 0}/5 <span style={{ fontSize: '0.85rem', color: '#f87171' }}>({visionData?.rejected_blurry_count ?? 0} rej)</span>
             </span>
           </div>
 
           {/* Vision Score Metric */}
           <div style={{
-            padding: '10px 12px',
+            padding: '12px 14px',
             borderRadius: '8px',
             background: 'rgba(30, 41, 59, 0.6)',
             border: '1px solid #334155',
@@ -202,17 +200,15 @@ export default function CameraVision({ visionData, cameraStatus, activeJoint = '
             justifyContent: 'space-between',
             alignItems: 'center'
           }}>
-            <span style={{ fontSize: '0.85rem', color: '#94a3b8' }}>Vision Channel Score</span>
+            <span style={{ fontSize: '0.95rem', color: '#94a3b8', fontWeight: 500 }}>Vision Channel Score</span>
             <span style={{
-              fontSize: '1rem',
+              fontSize: '1.25rem',
               fontWeight: 700,
               color: visionScore != null ? (visionScore >= 70 ? '#4ade80' : visionScore >= 40 ? '#fbbf24' : '#f87171') : '#94a3b8'
             }}>
               {visionScore != null ? `${visionScore} / 100` : 'WAITING'}
             </span>
           </div>
-
-
         </div>
       </div>
     </div>
