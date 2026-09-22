@@ -187,8 +187,9 @@ export default function ConveyorVisualization({ joints = {}, onJointClick }) {
           x="55"
           y="172"
           textAnchor="middle"
-          fill="rgba(255,255,255,0.25)"
-          fontSize="8"
+          fill="rgba(255,255,255,0.4)"
+          fontSize="10"
+          fontWeight="600"
           fontFamily="Inter, sans-serif"
           letterSpacing="0.08em"
         >
@@ -198,8 +199,9 @@ export default function ConveyorVisualization({ joints = {}, onJointClick }) {
           x="545"
           y="172"
           textAnchor="middle"
-          fill="rgba(255,255,255,0.25)"
-          fontSize="8"
+          fill="rgba(255,255,255,0.4)"
+          fontSize="10"
+          fontWeight="600"
           fontFamily="Inter, sans-serif"
           letterSpacing="0.08em"
         >
@@ -293,8 +295,9 @@ export default function ConveyorVisualization({ joints = {}, onJointClick }) {
                   x={cx}
                   y={cy - 25}
                   textAnchor="middle"
-                  fill="rgba(255,255,255,0.6)"
-                  fontSize="9"
+                  fill="rgba(255,255,255,0.85)"
+                  fontSize="11.5"
+                  fontWeight="600"
                   fontFamily="JetBrains Mono, monospace"
                 >
                   {joint.temperature?.toFixed(1)}°C
@@ -305,10 +308,10 @@ export default function ConveyorVisualization({ joints = {}, onJointClick }) {
               {joint && (
                 <text
                   x={cx}
-                  y={cy - 35}
+                  y={cy - 37}
                   textAnchor="middle"
-                  fill="rgba(255,255,255,0.35)"
-                  fontSize="7.5"
+                  fill="rgba(255,255,255,0.6)"
+                  fontSize="9.5"
                   fontFamily="JetBrains Mono, monospace"
                 >
                   {joint.vibration?.toFixed(2)} m/s²
@@ -321,7 +324,7 @@ export default function ConveyorVisualization({ joints = {}, onJointClick }) {
                 y={cy + 28}
                 textAnchor="middle"
                 fill={color}
-                fontSize="10"
+                fontSize="12"
                 fontWeight="700"
                 fontFamily="Inter, sans-serif"
                 letterSpacing="0.06em"
@@ -332,14 +335,14 @@ export default function ConveyorVisualization({ joints = {}, onJointClick }) {
               {/* Status / Zone label */}
               <text
                 x={cx}
-                y={cy + 38}
+                y={cy + 40}
                 textAnchor="middle"
                 fill={color}
-                fontSize="7"
-                opacity={isHovered ? 1 : 0.7}
+                fontSize="9"
+                opacity={isHovered ? 1 : 0.85}
                 fontFamily="Inter, sans-serif"
                 letterSpacing="0.05em"
-                fontWeight="600"
+                fontWeight="700"
                 style={{ transition: 'opacity 0.15s ease' }}
               >
                 {status}

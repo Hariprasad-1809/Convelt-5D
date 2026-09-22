@@ -1060,33 +1060,22 @@ class VisionService:
         print("[VISION SERVICE] Stopped vision thread and released camera.")
 
     def _open_camera(self) -> bool:
-        indices = [self.camera_index]
-        for alt in [1, 0]:
-            if alt not in indices:
-                indices.append(alt)
-
-        for idx in indices:
-            if sys.platform.startswith("win"):
-                cap = cv2.VideoCapture(idx, cv2.CAP_DSHOW)
-                if cap and cap.isOpened():
+        for idx in [self.camera_index, 0 if self.camera_index != 0 else 1]:
+            cap = cv2.VideoCapture(idx)
+            if cap and cap.isOpened():
+                # Warm up USB webcam to allow driver initialization
+                for _ in range(5):
                     ret, _ = cap.read()
                     if ret:
                         self.cap = cap
                         self.camera_status = "CONNECTED"
-                        print(f"[VISION SERVICE] Successfully opened camera index {idx} (CAP_DSHOW)")
+                        print(f"[VISION SERVICE] Successfully opened target webcam source index {idx}")
                         return True
-                    cap.release()
-
-            cap = cv2.VideoCapture(idx)
-            if cap and cap.isOpened():
-                ret, _ = cap.read()
-                if ret:
-                    self.cap = cap
-                    self.camera_status = "CONNECTED"
-                    print(f"[VISION SERVICE] Successfully opened camera index {idx}")
-                    return True
+                    time.sleep(0.05)
                 cap.release()
+                
         self.camera_status = "DISCONNECTED"
+        print(f"[VISION SERVICE ERROR] Failed to open target webcam at source index {self.camera_index}. Built-in camera (index 0) fallback disabled.")
         return False
 
     def _worker_loop(self):

@@ -130,20 +130,30 @@ class TrainableJointClassifier(BaseJointClassifier):
                     model.eval()
                     self.model = model
                 else:
-                    print(f"[INFO] PyTorch runtime unavailable; using Classical CV fallback for {resolved_path}")
-                    self.model = None
-                    self._load_attempted = True
-                    return False
+                    alt_joblib = os.path.splitext(resolved_path)[0] + ".joblib"
+                    if os.path.exists(alt_joblib):
+                        self.model = joblib.load(alt_joblib)
+                        resolved_path = alt_joblib
+                    else:
+                        print(f"[INFO] PyTorch runtime unavailable; using Classical CV fallback for {resolved_path}")
+                        self.model = None
+                        self._load_attempted = True
+                        return False
             elif resolved_path.endswith(".pt"):
                 if TORCH_AVAILABLE:
                     model = torch.load(resolved_path, map_location="cpu", weights_only=False)
                     model.eval()
                     self.model = model
                 else:
-                    print(f"[INFO] PyTorch runtime unavailable; using Classical CV fallback for {resolved_path}")
-                    self.model = None
-                    self._load_attempted = True
-                    return False
+                    alt_joblib = os.path.splitext(resolved_path)[0] + ".joblib"
+                    if os.path.exists(alt_joblib):
+                        self.model = joblib.load(alt_joblib)
+                        resolved_path = alt_joblib
+                    else:
+                        print(f"[INFO] PyTorch runtime unavailable; using Classical CV fallback for {resolved_path}")
+                        self.model = None
+                        self._load_attempted = True
+                        return False
             elif resolved_path.endswith((".joblib", ".pkl")):
                 self.model = joblib.load(resolved_path)
             else:

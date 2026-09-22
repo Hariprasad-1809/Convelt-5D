@@ -26,7 +26,7 @@ export default function StatusBadge({ status, showDot = true, size = 'default' }
   return (
     <span
       className={`badge ${cfg.className}`}
-      style={size === 'sm' ? { fontSize: '0.6rem', padding: '1px 6px' } : {}}
+      style={size === 'sm' ? { fontSize: '0.75rem', padding: '2px 8px' } : {}}
       aria-label={`Status: ${cfg.label}`}
     >
       {showDot && (
