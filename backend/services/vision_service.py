@@ -1002,13 +1002,13 @@ class VisionService:
                     if ret:
                         self.cap = cap
                         self.camera_status = "CONNECTED"
-                        print(f"[VISION SERVICE] Successfully opened target webcam source index {target_idx}")
+                        print(f"[VISION SERVICE] Successfully opened target webcam source index {idx}")
                         return True
                     time.sleep(0.05)
                 cap.release()
                 
         self.camera_status = "DISCONNECTED"
-        print(f"[VISION SERVICE ERROR] Failed to open target webcam at source index {target_idx}. Built-in camera (index 0) fallback disabled.")
+        print(f"[VISION SERVICE ERROR] Failed to open target webcam at source index {self.camera_index}. Built-in camera (index 0) fallback disabled.")
         return False
 
     def _worker_loop(self):
