@@ -5,7 +5,7 @@ import { getValueStatus } from '../data/mockData';
 import { DEFAULT_THRESHOLDS, JOINT_IDS, SENSOR_INFO } from '../data/constants';
 import StatusBadge from '../components/ui/StatusBadge';
 import SensorChart from '../components/ui/SensorChart';
-import CameraVision from '../components/ui/CameraVision';
+import VisionResultPanel from '../components/ui/VisionResultPanel';
 
 const TIME_RANGES = [
   { label: '1 min', points: 15 },
@@ -31,7 +31,7 @@ function SensorStatusRow({ label, sensor, connected }) {
 }
 
 export default function SensorData() {
-  const { joints = {}, lastUpdated, apiConnected, simStatus, hardwareStatus, wsStatus = 'CONNECTING', rawSerialLogs = [], visionData, cameraStatus } = useSimulation();
+  const { joints = {}, lastUpdated, apiConnected, simStatus, hardwareStatus, wsStatus = 'CONNECTING', rawSerialLogs = [] } = useSimulation();
 
 
   const [selectedJoint, setSelectedJoint] = useState('J01');
@@ -125,7 +125,7 @@ export default function SensorData() {
               ARDUINO UNO {isArduinoConnected ? 'CONNECTED' : 'DISCONNECTED'}
             </div>
             <div style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)' }}>
-              {hardwareStatus?.port || 'COM4'} @ {hardwareStatus?.baud || 9600} Baud · USB Serial Gateway
+              {hardwareStatus?.port || 'COM5'} @ {hardwareStatus?.baud || 9600} Baud · USB Serial Gateway
             </div>
           </div>
         </div>
@@ -162,18 +162,13 @@ export default function SensorData() {
         </div>
       </div>
 
-      {/* Live YOLO Camera Vision Inspector Component */}
-      <div style={{ marginBottom: '20px' }}>
-        <CameraVision visionData={visionData} cameraStatus={cameraStatus} activeJoint={selectedJoint} />
-      </div>
-
       {/* Live Arduino UNO Hardware Telemetry & Raw Serial Monitor Box */}
       <div className="card" style={{ marginBottom: '20px', padding: '16px' }}>
 
         <div className="section-header" style={{ marginBottom: '12px' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
             <span style={{ display: 'inline-block', width: 8, height: 8, borderRadius: '50%', background: isArduinoConnected ? 'var(--status-normal)' : 'var(--status-high)' }} />
-            <span className="section-title">Arduino UNO Live Hardware Telemetry & Serial Monitor Stream (COM4)</span>
+            <span className="section-title">Arduino UNO Live Hardware Telemetry & Serial Monitor Stream ({hardwareStatus?.port || 'COM5'})</span>
           </div>
           <span style={{ fontSize: 'var(--text-xs)', color: 'var(--text-muted)' }}>
             Real-Time USB Gateway Stream
@@ -231,7 +226,7 @@ export default function SensorData() {
         >
           {rawSerialLogs.length === 0 ? (
             <div style={{ color: 'var(--text-muted)', fontStyle: 'italic' }}>
-              Waiting for incoming serial telemetry frames from COM4...
+              Waiting for incoming serial telemetry frames from {hardwareStatus?.port || 'COM5'}...
             </div>
           ) : (
             rawSerialLogs.map((logLine, idx) => (
@@ -255,6 +250,9 @@ export default function SensorData() {
           )}
         </div>
       </div>
+
+      {/* ── Vision Inspection & Automated Motor Interlock ── */}
+      <VisionResultPanel />
 
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 280px', gap: '20px', marginBottom: '20px' }}>
         {/* Left: Charts + Filters */}

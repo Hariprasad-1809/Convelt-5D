@@ -51,7 +51,7 @@ class Settings(BaseSettings):
     # --------------------------------------------------------------------------
     # SERIAL & ARDUINO UNO HARDWARE CONFIGURATION
     # --------------------------------------------------------------------------
-    SERIAL_PORT: str = os.getenv("SERIAL_PORT", "COM4")
+    SERIAL_PORT: str = os.getenv("SERIAL_PORT", "COM5")
 
     SERIAL_BAUD: int = int(os.getenv("SERIAL_BAUD", "9600"))
     DEVICE_ID: str = os.getenv("DEVICE_ID", "ARDUINO_UNO_01")
@@ -62,7 +62,7 @@ class Settings(BaseSettings):
     # --------------------------------------------------------------------------
     # VISION & YOLO CAMERA CONFIGURATION
     # --------------------------------------------------------------------------
-    VISION_CAMERA_INDEX: int = int(os.getenv("VISION_CAMERA_INDEX", "1"))
+    VISION_CAMERA_INDEX: int = int(os.getenv("VISION_CAMERA_INDEX", "0"))
     VISION_MODEL_PATH: str = os.getenv(
         "VISION_MODEL_PATH",
         os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "check_yolo", "models", "joint_yolo_classifier_v4.pt"))

@@ -16,8 +16,8 @@ import StatusBadge from '../components/ui/StatusBadge';
 import SensorChart from '../components/ui/SensorChart';
 import AlertBanner from '../components/dashboard/AlertBanner';
 import SimulationControls from '../components/dashboard/SimulationControls';
+import VisionResultPanel from '../components/ui/VisionResultPanel';
 import Modal from '../components/ui/Modal';
-import CameraVision from '../components/ui/CameraVision';
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -193,7 +193,6 @@ export default function Dashboard() {
   const { joints, lastUpdated, hardwareStatus, apiConnected } = useLiveSensorData();
   const { activeAlerts, summary } = useAlerts();
 
-
   const [quickViewId, setQuickViewId] = useState(null);
   const [selectedChartJoint, setSelectedChartJoint] = useState('J01');
 
@@ -291,13 +290,15 @@ export default function Dashboard() {
         <MetricCard
           icon={<Radio size={15} />}
           label="Hardware Node (UNO)"
-          value={hardwareStatus?.connection_status === 'CONNECTED' ? 'Connected' : (apiConnected ? `Ready (${hardwareStatus?.port || 'COM4'})` : 'Offline')}
+          value={hardwareStatus?.connection_status === 'CONNECTED' ? 'Connected' : (apiConnected ? `Ready (${hardwareStatus?.port || 'COM5'})` : 'Offline')}
           unit=""
           status={hardwareStatus?.connection_status === 'CONNECTED' ? STATUS.NORMAL : STATUS.HIGH}
-          subtext={`${hardwareStatus?.port || 'COM4'} @ ${hardwareStatus?.baud || 9600} Baud · USB Serial Gateway`}
+          subtext={`${hardwareStatus?.port || 'COM5'} @ ${hardwareStatus?.baud || 9600} Baud · USB Serial Gateway`}
         />
-
       </div>
+
+      {/* ── Vision Inspection & Automated Motor Interlock ── */}
+      <VisionResultPanel />
 
       {/* ── 4. Live Charts with Joint Selector (J01 - J03) ── */}
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '12px', flexWrap: 'wrap', gap: '8px' }}>

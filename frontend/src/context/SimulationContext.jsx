@@ -111,7 +111,7 @@ export function SimulationProvider({ children }) {
     connection_status: 'DISCONNECTED',
     serial_status: 'DISCONNECTED',
     websocket_status: 'DISCONNECTED',
-    port: 'COM4',
+    port: 'COM5',
     baud: 9600,
     lastUpdated: null,
     temperature: null,
@@ -187,7 +187,7 @@ export function SimulationProvider({ children }) {
                 connection_status: serialStat,
                 serial_status: serialStat,
                 websocket_status: 'CONNECTED',
-                port: data.port || prev.port || 'COM4',
+                port: data.port || prev.port || 'COM5',
                 baud: data.baud || prev.baud || 9600,
                 temperature: data.temperature,
                 vibration: data.vibration,
@@ -265,7 +265,7 @@ export function SimulationProvider({ children }) {
                 connection_status: serialStat,
                 serial_status: serialStat,
                 websocket_status: 'CONNECTED',
-                port: data.port || 'COM4',
+                port: data.port || 'COM5',
                 baud: data.baud || 9600,
               }));
             }
@@ -374,9 +374,9 @@ export function SimulationProvider({ children }) {
           let currentTemp = sensorData?.temperature ?? j.temperature ?? prevJoint.temperature ?? 36.5;
           let currentVib = sensorData?.vibration ?? j.vibration ?? prevJoint.vibration ?? 1.5;
 
-          if (jid === 'J01' && (hardwareStatus?.connection_status === 'CONNECTED' || hardwareStatus?.serial_status === 'CONNECTED') && hardwareStatus?.temperature != null) {
-            currentTemp = hardwareStatus.temperature;
-            currentVib = hardwareStatus.vibration ?? currentVib;
+          if (jid === 'J01' && (hardwareStatus?.connection_status === 'CONNECTED' || hardwareStatus?.serial_status === 'CONNECTED')) {
+            if (hardwareStatus?.temperature != null) currentTemp = hardwareStatus.temperature;
+            if (hardwareStatus?.vibration != null) currentVib = hardwareStatus.vibration;
           }
 
           const currentRisk = j.risk_level || 'LOW';
@@ -528,7 +528,7 @@ export function SimulationProvider({ children }) {
             ...prev,
             device_id: hwData.device_id || 'ARDUINO_UNO_01',
             connection_status: hwData.connection_status || hwData.status || 'DISCONNECTED',
-            port: hwData.port || 'COM4',
+            port: hwData.port || 'COM5',
             baud: hwData.baud || 9600,
             lastUpdated: hwData.last_updated || prev.lastUpdated,
             temperature: hwData.latest_telemetry?.temperature ?? prev.temperature,
@@ -618,6 +618,29 @@ export function SimulationProvider({ children }) {
     );
   }, []);
 
+  // ─── Motor Interlock Actions ─────────────────────────────────────────────
+  const resumeMotor = useCallback(async () => {
+    try {
+      const res = await fetch(`${API_BASE}/api/v1/vision/resume`, { method: 'POST' });
+      const data = await res.json();
+      return data;
+    } catch (err) {
+      console.error('Failed to resume motor:', err);
+      return { status: 'error', message: err.message };
+    }
+  }, []);
+
+  const stopMotor = useCallback(async () => {
+    try {
+      const res = await fetch(`${API_BASE}/api/v1/vision/stop`, { method: 'POST' });
+      const data = await res.json();
+      return data;
+    } catch (err) {
+      console.error('Failed to stop motor:', err);
+      return { status: 'error', message: err.message };
+    }
+  }, []);
+
   // ─── Derived Alert Values ─────────────────────────────────────────────────────
   const activeAlerts = alerts.filter((a) => a.active);
   const resolvedAlerts = alerts.filter((a) => !a.active);
@@ -647,6 +670,9 @@ export function SimulationProvider({ children }) {
     visionData,
     cameraStatus,
 
+    // Motor Interlock Actions
+    resumeMotor,
+    stopMotor,
 
     // Simulation controls & status
     simStatus,

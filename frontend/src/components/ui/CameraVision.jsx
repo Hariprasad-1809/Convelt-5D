@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { Camera, CameraOff, AlertTriangle, CheckCircle2, ShieldAlert, HelpCircle } from 'lucide-react';
 
 /**
@@ -8,6 +8,23 @@ import { Camera, CameraOff, AlertTriangle, CheckCircle2, ShieldAlert, HelpCircle
  */
 export default function CameraVision({ visionData, cameraStatus, activeJoint = 'J01' }) {
   const [imgError, setImgError] = useState(false);
+
+  // Auto-recover stream when backend connects or sends live frames
+  useEffect(() => {
+    if (cameraStatus === 'CONNECTED') {
+      setImgError(false);
+    }
+  }, [cameraStatus]);
+
+  // Periodic retry if image errored out while camera is supposedly connected
+  useEffect(() => {
+    if (imgError && cameraStatus === 'CONNECTED') {
+      const timer = setTimeout(() => {
+        setImgError(false);
+      }, 3000);
+      return () => clearTimeout(timer);
+    }
+  }, [imgError, cameraStatus]);
 
   const isConnected = cameraStatus === 'CONNECTED' && !imgError;
   const label = visionData?.label || 'NO_JOINT';

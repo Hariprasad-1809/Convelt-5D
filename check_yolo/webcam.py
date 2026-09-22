@@ -54,8 +54,8 @@ def parse_args():
     parser.add_argument(
         "--source",
         type=int,
-        default=1,
-        help="Webcam device index (default: 1)",
+        default=0,
+        help="Webcam device index (default: 0)",
     )
     parser.add_argument(
         "--model",
@@ -323,16 +323,33 @@ def find_joint_in_roi(
     return (final_x, final_y, final_w, final_h)
 
 
-def is_in_inner_inspection_zone(rel_bbox: Tuple[int, int, int, int], roi_w: int, roi_h: int) -> bool:
-    """Checks if joint centroid is inside central 70% inner inspection zone."""
+def is_in_inner_inspection_zone(
+    rel_bbox: Tuple[int, int, int, int],
+    roi_w: int,
+    roi_h: int,
+    is_currently_inside: bool = False
+) -> bool:
+    """
+    Checks if joint centroid is inside inner inspection zone with hysteresis.
+    - Entry Boundary: stricter central 70% zone (prevents early edge triggers)
+    - Tracking/Exit Boundary: generous 90% zone (prevents boundary chatter/flicker)
+    """
     jx, jy, jw, jh = rel_bbox
     cx = jx + jw / 2.0
     cy = jy + jh / 2.0
 
-    xmin = roi_w * 0.08
-    xmax = roi_w * 0.92
-    ymin = roi_h * 0.10
-    ymax = roi_h * 0.90
+    if is_currently_inside:
+        # Generous "still tracking" boundary
+        xmin = roi_w * 0.03
+        xmax = roi_w * 0.97
+        ymin = roi_h * 0.04
+        ymax = roi_h * 0.96
+    else:
+        # Stricter entry boundary
+        xmin = roi_w * 0.08
+        xmax = roi_w * 0.92
+        ymin = roi_h * 0.10
+        ymax = roi_h * 0.90
 
     return (xmin <= cx <= xmax) and (ymin <= cy <= ymax)
 
@@ -344,17 +361,24 @@ def calculate_sharpness(crop: np.ndarray) -> float:
     return float(cv2.Laplacian(gray, cv2.CV_64F).var())
 
 
-def check_crop_quality(crop: np.ndarray, min_sharpness: float = 100.0) -> Tuple[bool, str, float]:
+def check_crop_quality(
+    crop: np.ndarray,
+    min_sharpness: float = 100.0,
+    is_approaching: bool = False
+) -> Tuple[bool, str, float]:
     """
     Validates crop quality before sending to YOLO.
     Rejects undersized, bad aspect ratio, dark, bright, or motion-blurred crops.
     """
     h, w = crop.shape[:2]
-    if h < 25 or w < 25:
+    if h < 20 or w < 20:
         return False, "TOO SMALL", 0.0
 
     aspect_ratio = float(h) / float(w)
-    if aspect_ratio > 3.2 or aspect_ratio < 0.15:
+    # Loosened aspect ratio: allow 0.08 to 4.5 standard, widened to 0.06 to 5.0 while approaching
+    max_ar = 5.0 if is_approaching else 4.5
+    min_ar = 0.06 if is_approaching else 0.08
+    if aspect_ratio > max_ar or aspect_ratio < min_ar:
         return False, "BAD ASPECT RATIO", 0.0
 
     mean_val = float(np.mean(crop))
@@ -427,6 +451,11 @@ class JointTrack:
         self.consecutive_contradictory_count: int = 0
         self.crop_history: List[Tuple[np.ndarray, str, float, float]] = []
 
+        # Robust State Machine Hysteresis & Debounce tracking
+        self.is_inside_zone: bool = False
+        self.consecutive_outside_frames: int = 0
+        self.consecutive_lost_frames: int = 0
+
     def update_position(self, raw_bbox: Tuple[int, int, int, int], timestamp: float, alpha: float = 0.3):
         self.raw_bbox = raw_bbox
         rx, ry, rw, rh = raw_bbox
@@ -443,6 +472,77 @@ class JointTrack:
         self.last_seen_time = timestamp
         self.total_frames_seen += 1
         self.total_frames_lost = 0
+        self.consecutive_lost_frames = 0
+        self.tracking_status = "VISUALIZED"
+
+
+def compute_bbox_iou(boxA: Tuple[int, int, int, int], boxB: Tuple[int, int, int, int]) -> float:
+    """Computes Intersection over Union (IoU) between two bounding boxes (x, y, w, h)."""
+    xA = max(boxA[0], boxB[0])
+    yA = max(boxA[1], boxB[1])
+    xB = min(boxA[0] + boxA[2], boxB[0] + boxB[2])
+    yB = min(boxA[1] + boxA[3], boxB[1] + boxB[3])
+
+    interW = max(0, xB - xA)
+    interH = max(0, yB - yA)
+    interArea = interW * interH
+    boxAArea = boxA[2] * boxA[3]
+    boxBArea = boxB[2] * boxB[3]
+    unionArea = float(boxAArea + boxBArea - interArea)
+    if unionArea <= 0:
+        return 0.0
+    return interArea / unionArea
+
+
+class JointTrack:
+    """
+    State object representing a single tracked conveyor belt joint (e.g. J01).
+    """
+    def __init__(self, joint_id: str, raw_bbox: Tuple[int, int, int, int], timestamp: float):
+        self.joint_id = joint_id
+        self.raw_bbox = raw_bbox
+        self.smoothed_bbox = raw_bbox  # (x, y, w, h)
+        self.last_centroid = (raw_bbox[0] + raw_bbox[2] / 2.0, raw_bbox[1] + raw_bbox[3] / 2.0)
+        self.first_seen_time = timestamp
+        self.last_seen_time = timestamp
+        self.total_frames_seen = 1
+        self.total_frames_lost = 0
+        self.tracking_status = "VISUALIZED"  # VISUALIZED, TEMPORARILY_LOST, EXITED
+        self.inspection_state = "APPROACHING"  # APPROACHING, INSPECTING, CONFIRMED, PASSED
+
+        # Buffer of valid sharp frames: (pred_label, p_healthy, p_damage, sharpness, timestamp)
+        self.accumulated_samples: List[Tuple[str, float, float, float, str]] = []
+        self.confirmed_label: str = "UNCERTAIN"  # HEALTHY, DAMAGE, UNCERTAIN
+        self.confirmed_confidence: float = 0.0
+        self.consecutive_contradictory_count: int = 0
+        self.crop_history: List[Tuple[np.ndarray, str, float, float]] = []
+
+        # Early-exit & rolling finalization lock
+        self.is_early_finalized: bool = False
+        self.finalized_at_state: Optional[str] = None
+
+        # Robust State Machine Hysteresis & Debounce tracking
+        self.is_inside_zone: bool = False
+        self.consecutive_outside_frames: int = 0
+        self.consecutive_lost_frames: int = 0
+
+    def update_position(self, raw_bbox: Tuple[int, int, int, int], timestamp: float, alpha: float = 0.3):
+        self.raw_bbox = raw_bbox
+        rx, ry, rw, rh = raw_bbox
+        sx, sy, sw, sh = self.smoothed_bbox
+
+        # Exponential Moving Average Bounding Box Smoothing
+        nx = int(alpha * rx + (1.0 - alpha) * sx)
+        ny = int(alpha * ry + (1.0 - alpha) * sy)
+        nw = int(alpha * rw + (1.0 - alpha) * sw)
+        nh = int(alpha * rh + (1.0 - alpha) * sh)
+
+        self.smoothed_bbox = (nx, ny, nw, nh)
+        self.last_centroid = (nx + nw / 2.0, ny + nh / 2.0)
+        self.last_seen_time = timestamp
+        self.total_frames_seen += 1
+        self.total_frames_lost = 0
+        self.consecutive_lost_frames = 0
         self.tracking_status = "VISUALIZED"
 
 
@@ -452,8 +552,12 @@ class JointGuardStateEngine:
     Features:
     - Persistent Joint Tracking & Association (J01, J02...)
     - EMA Bounding Box Smoothing (alpha = 0.3)
-    - Temporal Hold Timeout during dropouts (TRACK_LOST_TIMEOUT = 1.5s)
-    - Hysteresis (3 consecutive valid contradictory predictions required before label flip)
+    - Temporal Hold Timeout during dropouts (TRACK_LOST_TIMEOUT = 2.0s)
+    - Re-identification of recently lost tracks to prevent ID churn
+    - Hysteresis & rolling early finalization for high-confidence DAMAGE
+    - Full temporal history accumulation across track lifetime evaluated at PASSED
+    - Aspect ratio clamping/fallback to eliminate stalls while joint enters
+    - Debounced zone boundary evaluation preventing inside/outside flicker
     - Contact Sheet Generator (debug_crops/J01_contact_sheet.jpg)
     - Clean HUD Overlay & JSONL Event Logging
     """
@@ -464,11 +568,12 @@ class JointGuardStateEngine:
         damage_thresh: float = 0.70,
         healthy_thresh: float = 0.70,
         conf_margin: float = 0.15,
-        track_lost_timeout: float = 1.5,
+        track_lost_timeout: float = 2.0,
         bbox_smooth_alpha: float = 0.3,
         jsonl_path: Optional[str] = None,
         save_debug_crops: bool = False,
         debug_crops_dir: Optional[str] = None,
+        debounce_outside_frames: int = 5,
     ):
         self.target_frames = target_frames
         self.min_sharpness = min_sharpness
@@ -480,9 +585,11 @@ class JointGuardStateEngine:
         self.jsonl_path = jsonl_path
         self.save_debug_crops = save_debug_crops
         self.debug_crops_dir = debug_crops_dir or DEBUG_CROPS_DIR
+        self.debounce_outside_frames = debounce_outside_frames
 
         self.joint_counter = 1
         self.active_track: Optional[JointTrack] = None
+        self.recent_tracks: List[JointTrack] = []
         self.rejected_blurry_count = 0
         self.printed_debug_for_track: Dict[str, bool] = {}
 
@@ -502,6 +609,52 @@ class JointGuardStateEngine:
         self.joint_counter += 1
         return jid
 
+    def _finalize_track_verdict(self, track: JointTrack):
+        """
+        Evaluates and locks the FINAL verdict based on the full temporal history
+        across the joint track's entire lifetime at the moment it transitions to PASSED.
+        Guarantees majority-vote consistency: majority DAMAGE never produces HEALTHY.
+        """
+        if not track.accumulated_samples:
+            return
+
+        # If already locked as early-finalized DAMAGE, keep it locked
+        if track.is_early_finalized and track.confirmed_label == "DAMAGE":
+            return
+
+        n_samples = len(track.accumulated_samples)
+        avg_h = float(np.mean([s[1] for s in track.accumulated_samples]))
+        avg_d = float(np.mean([s[2] for s in track.accumulated_samples]))
+        damage_count = sum(1 for s in track.accumulated_samples if s[0] == "DAMAGE")
+        healthy_count = sum(1 for s in track.accumulated_samples if s[0] == "HEALTHY")
+
+        if n_samples >= min(3, self.target_frames):
+            # Prioritize Majority Vote Consistency
+            if damage_count > healthy_count:
+                track.confirmed_label = "DAMAGE"
+                track.confirmed_confidence = avg_d
+            elif healthy_count > damage_count:
+                if avg_d >= self.damage_thresh:
+                    track.confirmed_label = "UNCERTAIN"
+                    track.confirmed_confidence = max(avg_h, avg_d)
+                else:
+                    track.confirmed_label = "HEALTHY"
+                    track.confirmed_confidence = avg_h
+            else:
+                # Tie: break tie in favor of safety
+                if avg_d >= avg_h:
+                    track.confirmed_label = "DAMAGE"
+                    track.confirmed_confidence = avg_d
+                else:
+                    track.confirmed_label = "HEALTHY"
+                    track.confirmed_confidence = avg_h
+
+        # Consistency Safeguard: majority DAMAGE must NEVER have confirmed_label == HEALTHY
+        if damage_count > healthy_count and track.confirmed_label == "HEALTHY":
+            print(f"[CONSISTENCY OVERRIDE] Joint {track.joint_id}: majority was DAMAGE ({damage_count} vs {healthy_count}), overriding contradictory HEALTHY to DAMAGE!")
+            track.confirmed_label = "DAMAGE"
+            track.confirmed_confidence = avg_d
+
     def process_frame(
         self,
         frame: np.ndarray,
@@ -516,30 +669,53 @@ class JointGuardStateEngine:
         timestamp = datetime.datetime.now().isoformat()
         reason = "no-change"
 
-        # 1. TRACK ASSOCIATION OR CREATION
+        # 1. TRACK ASSOCIATION OR CREATION (WITH RE-IDENTIFICATION & EXTENDED REACH)
         if joint_detected and raw_bbox_full is not None:
             jx, jy, jw, jh = raw_bbox_full
             det_centroid = (jx + jw / 2.0, jy + jh / 2.0)
+            matched_track = None
 
+            # A. Check active track
             if self.active_track is not None and self.active_track.tracking_status != "EXITED":
                 dist = np.sqrt(
                     (det_centroid[0] - self.active_track.last_centroid[0])**2 +
                     (det_centroid[1] - self.active_track.last_centroid[1])**2
                 )
-                if dist <= 160.0:
-                    # Associated with current active joint track
-                    self.active_track.update_position(raw_bbox_full, now_ts, alpha=self.bbox_smooth_alpha)
-                else:
-                    # Centroid distance too large -> Expire old joint, create new
-                    self._close_joint_track(self.active_track)
-                    new_jid = self._get_next_joint_id()
-                    self.active_track = JointTrack(new_jid, raw_bbox_full, now_ts)
+                iou = compute_bbox_iou(raw_bbox_full, self.active_track.smoothed_bbox)
+                dx = abs(det_centroid[0] - self.active_track.last_centroid[0])
+                dy = abs(det_centroid[1] - self.active_track.last_centroid[1])
+
+                # Match if close, overlapping, or moving along conveyor belt
+                if dist <= 250.0 or iou > 0.04 or (dy <= 80.0 and dx <= 260.0):
+                    matched_track = self.active_track
+
+            # B. If active track didn't match or was None, check recent tracks (re-identification)
+            if matched_track is None and self.recent_tracks:
+                for r_track in reversed(self.recent_tracks):
+                    if now_ts - r_track.last_seen_time <= 2.5:
+                        r_dist = np.sqrt(
+                            (det_centroid[0] - r_track.last_centroid[0])**2 +
+                            (det_centroid[1] - r_track.last_centroid[1])**2
+                        )
+                        r_iou = compute_bbox_iou(raw_bbox_full, r_track.smoothed_bbox)
+                        r_dx = abs(det_centroid[0] - r_track.last_centroid[0])
+                        r_dy = abs(det_centroid[1] - r_track.last_centroid[1])
+                        if r_dist <= 250.0 or r_iou > 0.04 or (r_dy <= 80.0 and r_dx <= 260.0):
+                            matched_track = r_track
+                            break
+
+            if matched_track is not None:
+                self.active_track = matched_track
+                self.active_track.update_position(raw_bbox_full, now_ts, alpha=self.bbox_smooth_alpha)
             else:
+                if self.active_track is not None:
+                    self._close_joint_track(self.active_track)
                 new_jid = self._get_next_joint_id()
                 self.active_track = JointTrack(new_jid, raw_bbox_full, now_ts)
         else:
             # NO JOINT IN ROI
             if self.active_track is not None and self.active_track.tracking_status != "EXITED":
+                self.active_track.consecutive_lost_frames += 1
                 elapsed_lost = now_ts - self.active_track.last_seen_time
                 if elapsed_lost < self.track_lost_timeout:
                     self.active_track.tracking_status = "TEMPORARILY_LOST"
@@ -566,6 +742,7 @@ class JointGuardStateEngine:
                 "avg_p_damage": 0.0,
                 "tracking_status": "SEARCHING",
                 "inspection_state": "PASSED",
+                "is_early_finalized": False,
                 "total_frames_seen": 0,
                 "total_frames_lost": 0,
                 "smoothed_bbox": None,
@@ -575,16 +752,33 @@ class JointGuardStateEngine:
 
         track = self.active_track
 
-        # 2. UPDATE INSPECTION STATE & ZONE HANDLING
-        if not in_zone:
-            if track.inspection_state == "CONFIRMED":
-                track.inspection_state = "PASSED"
-            elif track.inspection_state != "PASSED":
-                track.inspection_state = "APPROACHING"
+        # 2. UPDATE INSPECTION STATE & ZONE HANDLING WITH DEBOUNCE
+        if in_zone:
+            track.consecutive_outside_frames = 0
+            track.is_inside_zone = True
+            if track.inspection_state == "APPROACHING":
+                track.inspection_state = "INSPECTING"
+        else:
+            if track.is_inside_zone:
+                track.consecutive_outside_frames += 1
+                if track.consecutive_outside_frames >= self.debounce_outside_frames:
+                    track.is_inside_zone = False
+                    if track.inspection_state in ("INSPECTING", "CONFIRMED"):
+                        track.inspection_state = "PASSED"
+                        self._finalize_track_verdict(track)
+                        reason = "zone-exit-debounced"
+            else:
+                if track.inspection_state == "CONFIRMED":
+                    track.inspection_state = "PASSED"
+                    self._finalize_track_verdict(track)
+                elif track.inspection_state != "PASSED":
+                    track.inspection_state = "APPROACHING"
 
+        if not joint_detected or not track.is_inside_zone:
+            current_lbl = "NOT VISIBLE" if not joint_detected else "OUTSIDE_ZONE"
             return {
                 "joint_id": track.joint_id,
-                "current_label": "OUTSIDE_ZONE",
+                "current_label": current_lbl,
                 "p_healthy": 0.0,
                 "p_damage": 0.0,
                 "confidence_margin": 0.0,
@@ -594,24 +788,39 @@ class JointGuardStateEngine:
                 "rejected_blurry_count": self.rejected_blurry_count,
                 "final_label": track.confirmed_label,
                 "final_confidence": track.confirmed_confidence,
-                "avg_p_healthy": 0.0,
-                "avg_p_damage": 0.0,
+                "avg_p_healthy": float(np.mean([s[1] for s in track.accumulated_samples])) if track.accumulated_samples else 0.0,
+                "avg_p_damage": float(np.mean([s[2] for s in track.accumulated_samples])) if track.accumulated_samples else 0.0,
                 "tracking_status": track.tracking_status,
                 "inspection_state": track.inspection_state,
+                "is_early_finalized": track.is_early_finalized,
                 "total_frames_seen": track.total_frames_seen,
                 "total_frames_lost": track.total_frames_lost,
                 "smoothed_bbox": track.smoothed_bbox,
                 "timestamp": timestamp,
-                "reason_for_final_change": "outside-zone",
+                "reason_for_final_change": reason if reason != "no-change" else ("temporarily-lost" if not joint_detected else "outside-zone"),
             }
 
-        # If inside inspection zone
-        if track.inspection_state == "APPROACHING":
-            track.inspection_state = "INSPECTING"
-
-        # 3. EXTRACT STABILIZED CROP USING SMOOTHED BBOX
+        # 3. EXTRACT STABILIZED CROP USING SMOOTHED BBOX (WITH ASPECT-RATIO CLAMPING)
         sx, sy, sw, sh = track.smoothed_bbox
         fh, fw = frame.shape[:2]
+
+        # Clamp/correct bounding box to nearest valid aspect ratio to prevent entry/skew stalls
+        # Conveyor joint crops should ideally have h/w in [0.20, 2.5]
+        if sw > 0 and sh > 0:
+            ar = float(sh) / float(sw)
+            if ar < 0.20:
+                # Too flat / vertically thin: expand height symmetrically with belt context
+                target_h = min(fh, max(sh, int(sw * 0.28)))
+                diff_h = target_h - sh
+                sy = max(0, sy - diff_h // 2)
+                sh = min(fh - sy, target_h)
+            elif ar > 3.0:
+                # Too narrow / horizontally thin (entering edge): expand width symmetrically
+                target_w = min(fw, max(sw, int(sh / 2.0)))
+                diff_w = target_w - sw
+                sx = max(0, sx - diff_w // 2)
+                sw = min(fw - sx, target_w)
+
         sx = max(0, min(fw - 10, sx))
         sy = max(0, min(fh - 10, sy))
         sw = max(10, min(fw - sx, sw))
@@ -624,7 +833,10 @@ class JointGuardStateEngine:
         if no_quality_check:
             is_valid, quality_reason = True, "OK"
         else:
-            is_valid, quality_reason, sharpness = check_crop_quality(joint_crop, self.min_sharpness)
+            is_approaching = (track.inspection_state == "APPROACHING")
+            is_valid, quality_reason, sharpness = check_crop_quality(
+                joint_crop, self.min_sharpness, is_approaching=is_approaching
+            )
 
         if not is_valid:
             if "BLURRY" in quality_reason:
@@ -659,62 +871,108 @@ class JointGuardStateEngine:
                 self.diag_healthy_confs.append(p_healthy)
 
             valid_frame = True
-            if len(track.accumulated_samples) < self.target_frames:
-                track.accumulated_samples.append(
-                    (current_label, p_healthy, p_damage, sharpness, timestamp)
-                )
+            # Accumulate all valid frames across track lifetime (never cap at target_frames!)
+            track.accumulated_samples.append(
+                (current_label, p_healthy, p_damage, sharpness, timestamp)
+            )
 
             # Save diagnostic crop
             if self.save_debug_crops:
                 self._save_track_crop(track.joint_id, joint_crop, current_label, p_healthy, p_damage, sharpness)
                 track.crop_history.append((joint_crop.copy(), current_label, p_healthy, p_damage))
 
-        # 4. EVALUATE TEMPORAL DECISION & HYSTERESIS
+        # 4. EVALUATE TEMPORAL DECISION, ROLLING EARLY-FINALIZATION & HYSTERESIS
+        n_samples = len(track.accumulated_samples)
         avg_h = float(np.mean([s[1] for s in track.accumulated_samples])) if track.accumulated_samples else 0.0
         avg_d = float(np.mean([s[2] for s in track.accumulated_samples])) if track.accumulated_samples else 0.0
+        damage_count = sum(1 for s in track.accumulated_samples if s[0] == "DAMAGE")
+        healthy_count = sum(1 for s in track.accumulated_samples if s[0] == "HEALTHY")
 
-        if len(track.accumulated_samples) >= min(3, self.target_frames):
-            damage_count = sum(1 for s in track.accumulated_samples if s[0] == "DAMAGE")
-            healthy_count = sum(1 for s in track.accumulated_samples if s[0] == "HEALTHY")
+        # If already early-finalized as DAMAGE, maintain locked verdict
+        if track.is_early_finalized and track.confirmed_label == "DAMAGE":
+            track.confirmed_confidence = avg_d
+            track.inspection_state = "CONFIRMED"
+        elif n_samples >= min(3, self.target_frames):
+            # Evaluate Early Finalization during INSPECTING
+            # Asymmetric safety policy: Fast-lock DAMAGE once confident threshold and samples are met
+            is_confident_damage = (
+                (n_samples >= self.target_frames and damage_count >= 3 and avg_d >= self.damage_thresh) or
+                (damage_count >= 4 and avg_d >= self.damage_thresh) or
+                (damage_count >= 3 and avg_d >= 0.85 and healthy_count == 0)
+            )
 
-            if damage_count >= 3 and avg_d >= self.damage_thresh:
-                candidate = "DAMAGE"
-                candidate_conf = avg_d
-            elif healthy_count >= 3 and avg_h >= self.healthy_thresh:
-                candidate = "HEALTHY"
-                candidate_conf = avg_h
+            if is_confident_damage:
+                track.confirmed_label = "DAMAGE"
+                track.confirmed_confidence = avg_d
+                track.is_early_finalized = True
+                track.finalized_at_state = "INSPECTING"
+                track.inspection_state = "CONFIRMED"
+                reason = "early-finalized-damage"
             else:
-                candidate = "UNCERTAIN"
-                candidate_conf = max(avg_h, avg_d)
+                # Normal rolling candidate evaluation
+                if damage_count >= 3 and avg_d >= self.damage_thresh:
+                    candidate = "DAMAGE"
+                    candidate_conf = avg_d
+                elif healthy_count >= 3 and avg_h >= self.healthy_thresh:
+                    candidate = "HEALTHY"
+                    candidate_conf = avg_h
+                elif damage_count > healthy_count and avg_d >= self.damage_thresh:
+                    candidate = "DAMAGE"
+                    candidate_conf = avg_d
+                elif healthy_count > damage_count and avg_h >= self.healthy_thresh:
+                    candidate = "HEALTHY"
+                    candidate_conf = avg_h
+                elif avg_d > avg_h and avg_d >= self.damage_thresh:
+                    candidate = "DAMAGE"
+                    candidate_conf = avg_d
+                elif avg_h > avg_d and avg_h >= self.healthy_thresh and damage_count == 0:
+                    candidate = "HEALTHY"
+                    candidate_conf = avg_h
+                else:
+                    candidate = "UNCERTAIN"
+                    candidate_conf = max(avg_h, avg_d)
 
-            # Apply Result Hysteresis
-            old_label = track.confirmed_label
-            if old_label in ("DAMAGE", "HEALTHY"):
-                if candidate not in ("UNCERTAIN", old_label):
-                    track.consecutive_contradictory_count += 1
-                    if track.consecutive_contradictory_count >= 3:
-                        track.confirmed_label = candidate
+                # Apply Result Hysteresis
+                old_label = track.confirmed_label
+                if old_label in ("DAMAGE", "HEALTHY"):
+                    # SAFETY OVERRIDE: DAMAGE candidate immediately overrides an early provisional HEALTHY label!
+                    if candidate == "DAMAGE" and old_label == "HEALTHY":
+                        track.confirmed_label = "DAMAGE"
                         track.confirmed_confidence = candidate_conf
                         track.inspection_state = "CONFIRMED"
                         track.consecutive_contradictory_count = 0
-                        reason = "3-consecutive-contradictory-valid-frames"
+                        reason = "damage-overrides-early-healthy"
+                    elif candidate not in ("UNCERTAIN", old_label):
+                        track.consecutive_contradictory_count += 1
+                        if track.consecutive_contradictory_count >= 3:
+                            track.confirmed_label = candidate
+                            track.confirmed_confidence = candidate_conf
+                            track.inspection_state = "CONFIRMED"
+                            track.consecutive_contradictory_count = 0
+                            reason = "3-consecutive-contradictory-valid-frames"
+                    else:
+                        track.consecutive_contradictory_count = 0
+                        if candidate == old_label:
+                            track.confirmed_confidence = candidate_conf
                 else:
-                    track.consecutive_contradictory_count = 0
-                    if candidate == old_label:
+                    # First confirmation
+                    if candidate != "UNCERTAIN":
+                        track.confirmed_label = candidate
                         track.confirmed_confidence = candidate_conf
-            else:
-                # First confirmation
-                if candidate != "UNCERTAIN":
-                    track.confirmed_label = candidate
-                    track.confirmed_confidence = candidate_conf
-                    track.inspection_state = "CONFIRMED"
-                    reason = "5-frame-majority"
-                else:
-                    track.confirmed_label = "UNCERTAIN"
-                    track.confirmed_confidence = candidate_conf
+                        track.inspection_state = "CONFIRMED"
+                        reason = "temporal-majority"
+                    else:
+                        track.confirmed_label = "UNCERTAIN"
+                        track.confirmed_confidence = candidate_conf
 
-        # Print debug trace upon 5-frame completion
-        if len(track.accumulated_samples) == self.target_frames and not self.printed_debug_for_track.get(track.joint_id, False):
+        # Consistency check: Ensure majority DAMAGE never has final_label == "HEALTHY"
+        if damage_count > healthy_count and track.confirmed_label == "HEALTHY":
+            track.confirmed_label = "DAMAGE"
+            track.confirmed_confidence = avg_d
+            track.inspection_state = "CONFIRMED"
+
+        # Print debug trace upon target_frames completion
+        if len(track.accumulated_samples) >= self.target_frames and not self.printed_debug_for_track.get(track.joint_id, False):
             self._print_5frame_debug_output(track)
             self.printed_debug_for_track[track.joint_id] = True
 
@@ -734,6 +992,7 @@ class JointGuardStateEngine:
             "avg_p_damage": avg_d,
             "tracking_status": track.tracking_status,
             "inspection_state": track.inspection_state,
+            "is_early_finalized": track.is_early_finalized,
             "total_frames_seen": track.total_frames_seen,
             "total_frames_lost": track.total_frames_lost,
             "smoothed_bbox": track.smoothed_bbox,
@@ -747,7 +1006,12 @@ class JointGuardStateEngine:
         return res
 
     def _close_joint_track(self, track: JointTrack):
-        """Generates contact sheet when a joint exits."""
+        """Finalizes track, caches in recent_tracks for re-identification, and generates contact sheet."""
+        self._finalize_track_verdict(track)
+        if track not in self.recent_tracks:
+            self.recent_tracks.append(track)
+            if len(self.recent_tracks) > 5:
+                self.recent_tracks.pop(0)
         if self.save_debug_crops and track.crop_history:
             generate_contact_sheet(track.joint_id, self.debug_crops_dir, track.crop_history)
 
@@ -771,6 +1035,12 @@ class JointGuardStateEngine:
         damage_count = sum(1 for s in track.accumulated_samples if s[0] == "DAMAGE")
         healthy_count = sum(1 for s in track.accumulated_samples if s[0] == "HEALTHY")
         majority = "DAMAGE" if damage_count > healthy_count else ("HEALTHY" if healthy_count > damage_count else "TIE")
+
+        # Consistency check before printing: majority DAMAGE must NEVER output FINAL: HEALTHY
+        if majority == "DAMAGE" and track.confirmed_label == "HEALTHY":
+            print(f"[CONSISTENCY WARNING] Majority is DAMAGE ({damage_count} vs {healthy_count}) but track was HEALTHY! Auto-correcting to DAMAGE.")
+            track.confirmed_label = "DAMAGE"
+            track.confirmed_confidence = float(np.mean([s[2] for s in track.accumulated_samples]))
 
         print(f"\nMajority: {majority}")
         print(f"Average confidence: {track.confirmed_confidence:.2f}")
@@ -826,19 +1096,48 @@ def main():
         print(f"[ERROR] {e}", file=sys.stderr)
         sys.exit(1)
 
-    cap = cv2.VideoCapture(args.source)
-    if not cap.isOpened():
-        print(f"[ERROR] Could not open webcam source {args.source}.", file=sys.stderr)
+    sources_to_try = [args.source]
+    for alt in [0, 1]:
+        if alt not in sources_to_try:
+            sources_to_try.append(alt)
+
+    cap = None
+    active_source = args.source
+    test_frame = None
+
+    for src in sources_to_try:
+        if sys.platform.startswith("win"):
+            cap_ds = cv2.VideoCapture(src, cv2.CAP_DSHOW)
+            if cap_ds and cap_ds.isOpened():
+                cap_ds.set(cv2.CAP_PROP_FRAME_WIDTH, args.width)
+                cap_ds.set(cv2.CAP_PROP_FRAME_HEIGHT, args.height)
+                ret_ds, frame_ds = cap_ds.read()
+                if ret_ds and frame_ds is not None:
+                    cap = cap_ds
+                    test_frame = frame_ds
+                    active_source = src
+                    break
+                cap_ds.release()
+
+        cap_std = cv2.VideoCapture(src)
+        if cap_std and cap_std.isOpened():
+            cap_std.set(cv2.CAP_PROP_FRAME_WIDTH, args.width)
+            cap_std.set(cv2.CAP_PROP_FRAME_HEIGHT, args.height)
+            ret_std, frame_std = cap_std.read()
+            if ret_std and frame_std is not None:
+                cap = cap_std
+                test_frame = frame_std
+                active_source = src
+                break
+            cap_std.release()
+
+    if cap is None or test_frame is None:
+        print(f"[ERROR] Could not open or capture from any camera source ({sources_to_try}).", file=sys.stderr)
         sys.exit(1)
 
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, args.width)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, args.height)
-
-    ret, test_frame = cap.read()
-    if not ret or test_frame is None:
-        print(f"[ERROR] Failed to capture test frame from source {args.source}.", file=sys.stderr)
-        cap.release()
-        sys.exit(1)
+    if active_source != args.source:
+        print(f"[INFO] Camera source {args.source} unavailable. Automatically connected to camera source {active_source}.")
+    args.source = active_source
 
     frame_h, frame_w = test_frame.shape[:2]
 
@@ -862,7 +1161,7 @@ def main():
     print(f"Confidence Margin:     {args.conf_margin:.2f}")
     print(f"Minimum Sharpness:     {args.min_sharpness:.1f} (Laplacian Variance)")
     print(f"Target Sharp Frames:   {args.target_frames} (Majority Voting)")
-    print(f"Track Lost Timeout:    1.5s")
+    print(f"Track Lost Timeout:    2.0s")
     print(f"Bbox Smooth Alpha:     0.3")
     print(f"Save Debug Crops:      {args.save_debug_crops}")
     print(f"JSONL Event Log:       {args.jsonl_log}")
@@ -882,7 +1181,7 @@ def main():
         damage_thresh=args.damage_thresh,
         healthy_thresh=args.healthy_thresh,
         conf_margin=args.conf_margin,
-        track_lost_timeout=1.5,
+        track_lost_timeout=2.0,
         bbox_smooth_alpha=0.3,
         jsonl_path=args.jsonl_log,
         save_debug_crops=args.save_debug_crops,
@@ -927,7 +1226,13 @@ def main():
                     fx, fy = rx1 + jx, ry1 + jy
                     actual_bbox_full = (fx, fy, jw, jh)
                     joint_detected = True
-                    in_inner_zone = is_in_inner_inspection_zone(rel_bbox, roi_w, roi_h)
+                    is_currently_inside = (
+                        tracker.active_track is not None and
+                        tracker.active_track.is_inside_zone
+                    )
+                    in_inner_zone = is_in_inner_inspection_zone(
+                        rel_bbox, roi_w, roi_h, is_currently_inside=is_currently_inside
+                    )
 
             # Process frame through JointGuardStateEngine
             eval_res = tracker.process_frame(

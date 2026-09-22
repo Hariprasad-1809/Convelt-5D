@@ -14,8 +14,14 @@ import time
 from datetime import datetime, timezone
 from typing import Dict, Any, Optional
 
-import serial
-import serial.tools.list_ports
+try:
+    import serial
+    import serial.tools.list_ports
+    SERIAL_AVAILABLE = True
+except ImportError:
+    serial = None
+    SERIAL_AVAILABLE = False
+
 from backend.config import settings
 from backend.database.db import SessionLocal
 from backend.models.orm_models import SensorReading, Joint
@@ -32,25 +38,45 @@ from backend.websocket.telemetry_ws import broadcast_telemetry_sync
 logger = logging.getLogger("jointguard.serial")
 
 def find_arduino_port(target_port: str) -> str:
-    """Find active COM port matching target or auto-detect Arduino board."""
-    ports = list(serial.tools.list_ports.comports())
+    """Find active COM port matching target or auto-detect Arduino board, ignoring Bluetooth serial links."""
+    if not SERIAL_AVAILABLE or serial is None:
+        return target_port
+
+    try:
+        ports = list(serial.tools.list_ports.comports())
+    except Exception as e:
+        logger.warning(f"[SERIAL] Error enumerating ports: {e}")
+        return target_port
+
     if not ports:
         return target_port
-    
-    # 1. Check if configured target_port is physically connected
+
+    # 1. Top priority: Auto-detect genuine USB Arduino / CH340 / FTDI hardware (explicitly non-Bluetooth)
     for p in ports:
-        if p.device.upper() == target_port.upper():
-            return p.device
-            
-    # 2. Auto-detect port with 'Arduino', 'CH340', or 'USB' description
-    for p in ports:
-        desc = p.description.lower()
-        if "arduino" in desc or "ch340" in desc or "usb serial" in desc:
+        desc = (p.description or "").lower()
+        hwid = (p.hwid or "").lower()
+        if "bluetooth" in desc or "bthenum" in hwid:
+            continue
+        if any(k in desc or k in hwid for k in ("arduino", "ch340", "usb serial", "usb-serial", "ftdi", "vid:pid=2341")):
             logger.info(f"[SERIAL] Auto-detected Arduino on {p.device} ({p.description})")
             return p.device
 
-    # 3. Fallback to first available COM port
-    return ports[0].device
+    # 2. Check if configured target_port is physically connected and not Bluetooth
+    for p in ports:
+        if p.device.upper() == target_port.upper():
+            desc = (p.description or "").lower()
+            if "bluetooth" not in desc:
+                return p.device
+
+    # 3. Fallback to any non-Bluetooth port
+    for p in ports:
+        desc = (p.description or "").lower()
+        if "bluetooth" not in desc:
+            logger.info(f"[SERIAL] Falling back to non-bluetooth port {p.device} ({p.description})")
+            return p.device
+
+    # 4. Fallback to target port
+    return target_port
 
 
 class SerialParser:
@@ -63,9 +89,10 @@ class SerialParser:
             return current_frame
 
         # 1. Temperature Parsing
-        # Matches: "Temperature : 28.50 C [NORMAL]" or "Temperature : SENSOR ERROR"
-        if "temperature" in cleaned.lower():
-            if "sensor error" in cleaned.lower():
+        # Matches strictly: "Temperature : 28.50 C [NORMAL]" or "Temperature : SENSOR ERROR"
+        # Does NOT match setup text like "Temperature sensor error:" or "TEMPERATURE:"
+        if re.search(r"^temperature\s*:", cleaned, re.IGNORECASE):
+            if "sensor error" in cleaned.lower() or "error" in cleaned.lower() and "c" not in cleaned.lower():
                 current_frame["temperature"] = None
                 current_frame["temperature_status"] = "ERROR"
             else:
@@ -76,8 +103,9 @@ class SerialParser:
                     current_frame["temperature_status"] = "HIGH" if ("HIGH" in upper_line or "DANGER" in upper_line) else "NORMAL"
 
         # 2. Vibration Parsing
-        # Matches: "Vibration : 0.15 m/s2 [NORMAL]" or "Vibration : SENSOR ERROR"
-        elif "vibration" in cleaned.lower():
+        # Matches strictly: "Vibration   : 0.15 m/s2 [NORMAL]" or "Vibration   : SENSOR ERROR"
+        # Does NOT match setup text like "Vibration baseline: ..." or "VIBRATION:"
+        elif re.search(r"^vibration\s*:", cleaned, re.IGNORECASE):
             if "sensor error" in cleaned.lower():
                 current_frame["vibration"] = None
                 current_frame["vibration_status"] = "ERROR"
@@ -95,22 +123,22 @@ class SerialParser:
 
         # 3. Hall Sensor Parsing
         # Matches: "Hall Sensor : MAGNET DETECTED" or "Hall Sensor : NO MAGNET"
-        elif "hall sensor" in cleaned.lower() or "hall" in cleaned.lower():
+        elif re.search(r"^(?:hall\s+sensor|hall)\s*:", cleaned, re.IGNORECASE):
             if "magnet detected" in cleaned.lower():
                 current_frame["hall_detected"] = True
             elif "no magnet" in cleaned.lower():
                 current_frame["hall_detected"] = False
 
         # 4. Motor Speed Parsing
-        # Matches: "Motor Speed : 30%"
-        elif "motor speed" in cleaned.lower():
+        # Matches strictly: "Motor Speed : 30%"
+        elif re.search(r"^motor\s+speed\s*:", cleaned, re.IGNORECASE):
             match = re.search(r"(\d+)", cleaned)
             if match:
                 current_frame["motor_speed"] = int(match.group(1))
 
         # 5. Motor Running Status Parsing
-        # Matches: "Motor : RUNNING" or "Motor : STOPPED"
-        elif "motor" in cleaned.lower() and "speed" not in cleaned.lower():
+        # Matches strictly: "Motor       : RUNNING" or "Motor       : STOPPED"
+        elif re.search(r"^motor\s*:", cleaned, re.IGNORECASE):
             if "running" in cleaned.lower():
                 current_frame["motor_running"] = True
             elif "stopped" in cleaned.lower():
@@ -130,6 +158,15 @@ class SerialReaderService:
         self.last_updated: Optional[datetime] = None
         self.latest_telemetry: Dict[str, Any] = {}
 
+        # Hardware Command & Motor Interlock Feedback State
+        self.motor_stop_confirmed: bool = False
+        self.last_command_sent: Optional[str] = None
+        self.last_command_sent_time: Optional[float] = None
+        self.last_command_status: str = "IDLE"  # IDLE, SENT, CONFIRMED, TIMEOUT, FAILED
+        self.last_command_ack: Optional[str] = None
+        self._pending_command: Optional[str] = None
+        self._ack_event = threading.Event()
+
         self._running = False
         self._thread: Optional[threading.Thread] = None
         self._async_loop: Optional[asyncio.AbstractEventLoop] = None
@@ -142,6 +179,13 @@ class SerialReaderService:
         
         self._async_loop = loop
         self._running = True
+
+        if not SERIAL_AVAILABLE:
+            logger.warning("[SERIAL] pyserial package not installed; serial service is disabled.")
+            self.connection_status = "DISCONNECTED"
+            self._notify_status("DISCONNECTED", "pyserial not installed")
+            return
+
         logger.info(f"[SERIAL] Configured port: {self.port}")
         logger.info(f"[SERIAL] Baud rate: {self.baud}")
         logger.info(f"[SERIAL] Attempting connection to Arduino UNO...")
@@ -157,6 +201,95 @@ class SerialReaderService:
             except Exception as e:
                 logger.warning(f"[SERIAL] Error closing port: {e}")
         self.connection_status = "DISCONNECTED"
+
+    def _check_line_for_ack(self, line: str, expected_cmd: Optional[str] = None) -> bool:
+        """
+        Inspects an incoming serial line from Arduino for command confirmation strings:
+        - STOP:   'COMMAND RECEIVED: STOP' or 'Motor STOPPED'
+        - RESUME: 'COMMAND RECEIVED: RESUME' or 'Motor STARTED'
+        """
+        cmd = (expected_cmd or self._pending_command or "").upper()
+        line_clean = line.strip()
+
+        if "COMMAND RECEIVED: STOP" in line_clean or ("Motor STOPPED" in line_clean and (not cmd or cmd == "STOP")):
+            self.motor_stop_confirmed = True
+            self.last_command_ack = "STOP"
+            self.last_command_status = "CONFIRMED"
+            self._ack_event.set()
+            logger.info(f"[HARDWARE CONFIRMATION] Arduino confirmed: {line_clean}")
+            return True
+        elif "COMMAND RECEIVED: RESUME" in line_clean or ("Motor STARTED" in line_clean and (not cmd or cmd in ("RESUME", "START"))):
+            self.motor_stop_confirmed = False
+            self.last_command_ack = "RESUME"
+            self.last_command_status = "CONFIRMED"
+            self._ack_event.set()
+            logger.info(f"[HARDWARE CONFIRMATION] Arduino confirmed: {line_clean}")
+            return True
+        return False
+
+    def _read_direct_ack(self, expected_cmd: str, timeout: float = 1.0) -> bool:
+        """Direct read fallback for synchronous or test connections."""
+        start = time.time()
+        while time.time() - start < timeout:
+            try:
+                if hasattr(self._serial_conn, "readline"):
+                    raw = self._serial_conn.readline()
+                    if raw:
+                        line = raw.decode("utf-8", errors="ignore").strip()
+                        if self._check_line_for_ack(line, expected_cmd):
+                            return True
+                time.sleep(0.02)
+            except Exception:
+                break
+        return False
+
+    def send_command(self, command: str, wait_for_ack: bool = False, timeout: float = 1.0) -> bool:
+        """
+        Transmits exact newline-terminated ASCII bytes (b'STOP\\n' or b'RESUME\\n')
+        over the active serial connection to the Arduino UNO.
+        Optionally waits for hardware confirmation output.
+        """
+        cmd_clean = command.strip().upper()
+        if not self._serial_conn or not self._serial_conn.is_open:
+            logger.error(f"[SERIAL] Cannot send command '{cmd_clean}': Serial port {self.port} is closed or disconnected")
+            self.last_command_status = "FAILED"
+            return False
+
+        try:
+            cmd_payload = b"STOP\n" if cmd_clean == "STOP" else (b"RESUME\n" if cmd_clean in ("RESUME", "START") else f"{cmd_clean}\n".encode("utf-8"))
+            self._ack_event.clear()
+            self._pending_command = cmd_clean
+            self.last_command_sent = cmd_clean
+            self.last_command_sent_time = time.time()
+            self.last_command_status = "SENT"
+
+            self._serial_conn.write(cmd_payload)
+            self._serial_conn.flush()
+            logger.warning(f"[SERIAL COMMAND SENT] -> Arduino: {cmd_clean} ({cmd_payload})")
+
+            if wait_for_ack:
+                if self._thread and self._thread.is_alive():
+                    ack_received = self._ack_event.wait(timeout=timeout)
+                else:
+                    ack_received = self._read_direct_ack(cmd_clean, timeout=timeout)
+
+                if ack_received:
+                    self.last_command_status = "CONFIRMED"
+                    if cmd_clean == "STOP":
+                        self.motor_stop_confirmed = True
+                    elif cmd_clean in ("RESUME", "START"):
+                        self.motor_stop_confirmed = False
+                    return True
+                else:
+                    self.last_command_status = "TIMEOUT"
+                    logger.warning(f"[SERIAL ACK TIMEOUT] -> Sent {cmd_clean}, but no hardware confirmation within {timeout}s")
+                    return False
+
+            return True
+        except Exception as e:
+            self.last_command_status = "FAILED"
+            logger.error(f"[SERIAL] Failed to write command '{cmd_clean}' to port {self.port}: {e}")
+            return False
 
     def _run_loop(self):
         """Main thread loop handling connection, reading, and reconnection logic."""
@@ -204,6 +337,9 @@ class SerialReaderService:
                         line = raw_line.decode('utf-8', errors='ignore').strip()
                         if not line:
                             continue
+
+                        # Check for command acknowledgment lines from Arduino
+                        self._check_line_for_ack(line)
 
                         if self.connection_status != "CONNECTED":
                             self.connection_status = "CONNECTED"
@@ -342,6 +478,9 @@ class SerialReaderService:
             "hall_detected": hall,
             "motor_speed": motor_speed,
             "motor_running": motor_running,
+            "motor_stop_confirmed": self.motor_stop_confirmed or (not motor_running and self.last_command_ack == "STOP"),
+            "last_command_status": self.last_command_status,
+            "last_command_ack": self.last_command_ack,
             "health_score": health_score,
             "risk_level": risk_level,
             "connection_status": "CONNECTED",
