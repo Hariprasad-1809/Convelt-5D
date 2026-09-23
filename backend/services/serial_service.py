@@ -11,6 +11,7 @@ import logging
 import re
 import threading
 import time
+from collections import deque
 from datetime import datetime, timezone
 from typing import Dict, Any, Optional
 
@@ -157,6 +158,7 @@ class SerialReaderService:
         self.connection_status = "DISCONNECTED" # CONNECTED, DISCONNECTED, RECONNECTING, ERROR
         self.last_updated: Optional[datetime] = None
         self.latest_telemetry: Dict[str, Any] = {}
+        self.raw_serial_lines: deque = deque(maxlen=100)  # Last 100 raw lines for diagnostics
 
         # Hardware Command & Motor Interlock Feedback State
         self.motor_stop_confirmed: bool = False
@@ -296,14 +298,39 @@ class SerialReaderService:
         while self._running:
             try:
                 available = list(serial.tools.list_ports.comports())
+                logger.info(f"[SERIAL] All detected COM ports:")
                 if available:
-                    logger.info(f"[SERIAL] Available ports:")
                     for p in available:
-                        logger.info(f"  {p.device} - {p.description}")
+                        desc = (p.description or "").lower()
+                        hwid = (p.hwid or "").lower()
+                        is_bt = "bluetooth" in desc or "bthenum" in hwid
+                        logger.info(f"  {p.device} - {p.description} {'[BLUETOOTH - SKIPPED]' if is_bt else '[USB]'}")
+                else:
+                    logger.warning("[SERIAL] No COM ports detected at all.")
+
+                # ── Pre-check: abort if no non-Bluetooth USB ports are present ───────
+                usb_ports = [
+                    p for p in available
+                    if "bluetooth" not in (p.description or "").lower()
+                    and "bthenum" not in (p.hwid or "").lower()
+                ]
+                if not usb_ports:
+                    logger.error(
+                        "[SERIAL] ❌ No USB serial ports found. Arduino may not be connected "
+                        "or PlatformIO Serial Monitor is holding the port. "
+                        "Check USB cable, Device Manager (CH340 driver), and close PlatformIO Serial Monitor."
+                    )
+                    self.connection_status = "DISCONNECTED"
+                    self._notify_status(
+                        "DISCONNECTED",
+                        "No USB Arduino detected. Check USB cable, CH340 driver, and close PlatformIO Serial Monitor."
+                    )
+                    time.sleep(settings.SERIAL_RECONNECT_INTERVAL_SECONDS)
+                    continue
 
                 active_port = find_arduino_port(self.port)
-                logger.info(f"[SERIAL] Using {active_port}")
-                
+                logger.info(f"[SERIAL] Attempting to open: {active_port}")
+
                 self._serial_conn = serial.Serial()
                 self._serial_conn.port = active_port
                 self._serial_conn.baudrate = self.baud
@@ -312,9 +339,9 @@ class SerialReaderService:
                 self._serial_conn.open()
                 self.port = active_port
                 time.sleep(1) # Give Arduino serial buffer time to stabilize
-                
+
                 self.connection_status = "CONNECTED"
-                logger.info(f"[SERIAL] Arduino UNO connected on {self.port}")
+                logger.info(f"[SERIAL] ✅ Arduino UNO connected on {self.port} @ {self.baud} baud")
                 self._notify_status("CONNECTED", f"Serial port {self.port} opened successfully")
 
                 current_frame: Dict[str, Any] = {}
@@ -338,6 +365,10 @@ class SerialReaderService:
                         if not line:
                             continue
 
+                        # Log every raw line for diagnostics
+                        logger.debug(f"[SERIAL RAW] {repr(line)}")
+                        self.raw_serial_lines.append(line)
+
                         # Check for command acknowledgment lines from Arduino
                         self._check_line_for_ack(line)
 
@@ -348,7 +379,16 @@ class SerialReaderService:
                         # Check for banner line indicating frame boundary
                         if line.startswith("==="):
                             if current_frame and ("temperature" in current_frame or "vibration" in current_frame):
+                                logger.debug(f"[SERIAL] Completed frame: {current_frame}")
                                 self._process_completed_frame(current_frame)
+                                current_frame = {}
+                            elif current_frame:
+                                # Frame had data but neither temperature nor vibration — log and discard
+                                logger.warning(
+                                    f"[SERIAL] Discarded frame — no temperature/vibration parsed. "
+                                    f"Frame keys: {list(current_frame.keys())}. "
+                                    f"Raw lines may not match parser regex. Check Arduino output format."
+                                )
                                 current_frame = {}
                         else:
                             current_frame = SerialParser.parse_line(line, current_frame)
@@ -386,20 +426,14 @@ class SerialReaderService:
         motor_speed = frame.get("motor_speed", 0)
         motor_running = frame.get("motor_running", False)
 
-        # Log individual parsed values
-        if temp is not None:
-            logger.info(f"[SERIAL] Temperature = {temp:.2f} C")
-        else:
-            logger.info(f"[SERIAL] Temperature = SENSOR ERROR")
-
-        if vib is not None:
-            logger.info(f"[SERIAL] Vibration = {vib:.2f} m/s2")
-        else:
-            logger.info(f"[SERIAL] Vibration = SENSOR ERROR")
-
-        logger.info(f"[SERIAL] Hall = {'MAGNET DETECTED' if hall else 'NO MAGNET'}")
-        logger.info(f"[SERIAL] Motor Speed = {motor_speed}%")
-        logger.info(f"[SERIAL] Motor = {'RUNNING' if motor_running else 'STOPPED'}")
+        # ── Enhanced diagnostics: confirm parse results ─────────────────────────
+        logger.info(f"[SERIAL FRAME] {'='*40}")
+        logger.info(f"[SERIAL FRAME] Temperature  = {f'{temp:.2f} C' if temp is not None else 'SENSOR ERROR / NOT PARSED'}")
+        logger.info(f"[SERIAL FRAME] Vibration    = {f'{vib:.2f} m/s2' if vib is not None else 'SENSOR ERROR / NOT PARSED'}")
+        logger.info(f"[SERIAL FRAME] Hall Sensor  = {'MAGNET DETECTED' if hall else 'NO MAGNET'}")
+        logger.info(f"[SERIAL FRAME] Motor Speed  = {motor_speed}%")
+        logger.info(f"[SERIAL FRAME] Motor State  = {'RUNNING' if motor_running else 'STOPPED'}")
+        logger.info(f"[SERIAL FRAME] {'='*40}")
 
         # 1. Calculate Component Scores (0-100) and Health Score via fusion engine
         v_score = vision_score(85.0)
@@ -497,8 +531,13 @@ class SerialReaderService:
             broadcast_telemetry_sync(self._async_loop, payload)
 
     def _notify_status(self, status: str, message: str):
-
         """Broadcast connection status changes to WebSocket clients."""
+
+        # ── If serial drops, update latest_telemetry so stale CONNECTED never leaks ──
+        if status in ("DISCONNECTED", "ERROR", "RECONNECTING") and self.latest_telemetry:
+            self.latest_telemetry["connection_status"] = status
+            self.latest_telemetry["serial_status"] = status
+
         payload = {
             "type": "connection_status",
             "device_id": self.device_id,

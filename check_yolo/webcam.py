@@ -269,32 +269,21 @@ def find_joint_in_roi(
         if is_side_rail:
             continue
 
-        # Reject static background boundary artifacts along the bottom/top belt border
-        # (e.g. bright contrast edge between dark rubber belt and light floor/mount behind it)
+        # Reject narrow static background boundary artifacts pinned right against outer borders
+        # (e.g. thin horizontal edge between dark rubber belt and light floor/mount behind it).
+        # A real metallic joint has substantial height/thickness or spans across the belt,
+        # whereas a background border artifact is a thin edge sliver (bh <= 25) or full-width floor boundary.
         is_bottom_background_edge = (
-            (by + bh >= h - 4) or
-            (by >= int(0.78 * h) and bh < int(0.25 * h)) or
-            (by + bh >= int(0.88 * h) and bw > 2.5 * bh)
+            (by + bh >= h - 3) and (by > 0.50 * h) and (bh <= 25 or bw >= int(0.85 * w))
         )
         if is_bottom_background_edge:
             continue
 
         is_top_background_edge = (
-            (by <= 3) and (bh < int(0.20 * h) or by + bh <= int(0.25 * h))
+            (by <= 3) and (bh <= 25 and by + bh <= 30 and bw >= int(0.85 * w))
         )
         if is_top_background_edge:
             continue
-
-        # Dual-edge context check for candidates in lower portion of ROI:
-        # A real metallic joint is bounded by dark belt rubber on both sides (above and below).
-        # A static background transition at the floor/mount lacks a dark rubber boundary below it.
-        if by >= int(0.65 * h):
-            below_band = v_chan[by + bh : min(h, by + bh + 10), bx : bx + bw]
-            if below_band.size > 0:
-                below_v_mean = float(np.mean(below_band))
-                if below_v_mean > 145.0:
-                    # Below region is bright floor/mount, not dark rubber belt
-                    continue
 
         cand_v = v_chan[by:by+bh, bx:bx+bw]
         cand_s = s_chan[by:by+bh, bx:bx+bw]
@@ -370,13 +359,13 @@ def is_in_inner_inspection_zone(
         xmin = roi_w * 0.03
         xmax = roi_w * 0.97
         ymin = roi_h * 0.04
-        ymax = roi_h * 0.88
+        ymax = roi_h * 0.96
     else:
         # Stricter entry boundary
         xmin = roi_w * 0.08
         xmax = roi_w * 0.92
         ymin = roi_h * 0.10
-        ymax = roi_h * 0.82
+        ymax = roi_h * 0.90
 
     return (xmin <= cx <= xmax) and (ymin <= cy <= ymax)
 
@@ -1310,7 +1299,7 @@ def main():
             iz_x1 = rx1 + int(roi_w * 0.08)
             iz_y1 = ry1 + int(roi_h * 0.10)
             iz_x2 = rx1 + int(roi_w * 0.92)
-            iz_y2 = ry1 + int(roi_h * 0.82)
+            iz_y2 = ry1 + int(roi_h * 0.90)
             cv2.rectangle(display_frame, (iz_x1, iz_y1), (iz_x2, iz_y2), (0, 255, 255), 1)
             cv2.putText(display_frame, "INNER INSPECTION ZONE", (iz_x1 + 5, iz_y1 + 15), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 255), 1)
 

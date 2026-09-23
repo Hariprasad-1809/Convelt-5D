@@ -50,3 +50,19 @@ def get_hardware_status():
         "latest_telemetry": serial_service.latest_telemetry
     }
 
+@router.get("/hardware/rawlog")
+def get_hardware_rawlog():
+    """Return last 100 raw serial lines received from Arduino (for diagnostics).
+    
+    If this list is empty → Arduino is not sending data (check USB cable / firmware).
+    If lines are present but no telemetry parses → check line format vs parser regex.
+    """
+    lines = list(serial_service.raw_serial_lines)
+    return {
+        "port": serial_service.port,
+        "connection_status": serial_service.connection_status,
+        "raw_line_count": len(lines),
+        "raw_lines": lines[-50:],  # Last 50 for readability
+        "hint": "If raw_lines is empty, Arduino is not sending serial data. "
+                "If lines exist but sensor values are null, the parser regex may not match."
+    }

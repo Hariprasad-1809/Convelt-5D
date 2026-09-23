@@ -206,35 +206,63 @@ def test_issue2_stale_box_not_rendered_after_grace_period():
 def test_issue3_static_background_bottom_edge_rejected():
     """
     ISSUE 3 REGRESSION TEST:
-    Verifies that a static contrast edge along the bottom edge of the ROI (the boundary
-    between the dark rubber belt and light floor/mount) is rejected as a candidate,
-    while a real metallic joint centered on the conveyor belt is detected correctly.
+    Verifies that:
+    1. A static contrast edge along the bottom edge of the ROI (the boundary between dark rubber belt
+       and light floor/mount) is rejected as a false-positive candidate.
+    2. Real metallic joints anywhere in the zone (centered, near bottom edge, or full vertical span)
+       ARE detected correctly.
+    3. A real joint that remains stationary across multiple consecutive frames maintains valid detection
+       without dropping to NOT VISIBLE or losing its bounding box.
     """
-    # Create synthetic ROI crop (h=300, w=400):
-    # Conveyor belt rubber is dark (V ~ 60)
+    # Create synthetic ROI crop (h=300, w=400): Conveyor belt rubber is dark (V ~ 60)
     roi_dark_belt = np.ones((300, 400, 3), dtype=np.uint8) * 60
 
-    # 1. Simulate static bright floor along bottom border (y >= 260 to 300)
-    # Bright neutral color: V >= 200, S <= 30 (floor/mount behind belt)
+    # 1. Negative case: Static bright floor along bottom border (y >= 265 to 300, full width)
     roi_with_floor_edge = roi_dark_belt.copy()
-    roi_with_floor_edge[265:300, :] = 220  # Bright white/light floor at bottom
+    roi_with_floor_edge[265:300, :] = 220  # Bright white/light floor spanning across bottom
 
     detected_edge = find_joint_in_roi(roi_with_floor_edge, min_area=400, min_width=30)
     assert detected_edge is None, (
         f"FALSE POSITIVE REGRESSION: Static bottom background edge was accepted as a joint: {detected_edge}"
     )
 
-    # 2. Simulate real metallic joint on the belt (centered at y=100..180, x=150..270)
-    # Metallic joint: V >= 200, S <= 40, enclosed by dark rubber belt above and below
+    # 2. Positive case 1: Real metallic joint centered on belt
     roi_with_real_joint = roi_dark_belt.copy()
-    # Fill metallic patch
-    roi_with_real_joint[110:170, 140:260] = 210  # Metallic plate in center
-
-    detected_joint = find_joint_in_roi(roi_with_real_joint, min_area=400, min_width=30)
-    assert detected_joint is not None, "Real metallic joint on conveyor belt was incorrectly rejected!"
-    jx, jy, jw, jh = detected_joint
-    # Center should be roughly near (200, 140)
+    roi_with_real_joint[110:170, 140:260] = 210
+    detected_center = find_joint_in_roi(roi_with_real_joint, min_area=400, min_width=30)
+    assert detected_center is not None, "Real metallic joint on conveyor belt was incorrectly rejected!"
+    jx, jy, jw, jh = detected_center
     assert 120 <= jx <= 160, f"Expected jx around 140, got {jx}"
     assert 90 <= jy <= 130, f"Expected jy around 110, got {jy}"
-    assert jw >= 100
-    assert jh >= 50
+
+    # 3. Positive case 2: Real metallic joint near the bottom edge (y=220..280, h=60)
+    roi_near_bottom = roi_dark_belt.copy()
+    roi_near_bottom[220:280, 140:260] = 210
+    detected_bottom = find_joint_in_roi(roi_near_bottom, min_area=400, min_width=30)
+    assert detected_bottom is not None, "Real metallic joint near bottom edge was incorrectly rejected!"
+
+    # 4. Positive case 3: Real joint spanning vertically across the belt (y=0..300, as seen on real rig)
+    roi_full_vertical = roi_dark_belt.copy()
+    roi_full_vertical[0:300, 150:250] = 210
+    detected_vertical = find_joint_in_roi(roi_full_vertical, min_area=400, min_width=30)
+    assert detected_vertical is not None, "Real metallic joint spanning belt vertically was incorrectly rejected!"
+
+    # 5. Positive case 4: Stationary joint across consecutive frames
+    engine = JointGuardStateEngine(target_frames=5, damage_thresh=0.70)
+    yolo = MockYOLO(lambda idx, c: (0.95, 0.05))
+    frame = np.ones((480, 640, 3), dtype=np.uint8) * 60
+    # Joint sits stationary in the middle of inspection zone for 10 frames
+    stat_bbox = (200, 150, 180, 180)
+    for frame_idx in range(10):
+        res = engine.process_frame(
+            frame,
+            joint_detected=True,
+            raw_bbox_full=stat_bbox,
+            in_zone=True,
+            yolo_model=yolo,
+            no_quality_check=True
+        )
+        assert res["smoothed_bbox"] is not None, f"Stationary joint lost bounding box at frame {frame_idx}"
+        assert res["current_label"] != "NOT VISIBLE", f"Stationary joint reported NOT VISIBLE at frame {frame_idx}"
+        assert res["consecutive_lost_frames"] == 0
+

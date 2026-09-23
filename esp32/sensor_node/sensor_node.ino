@@ -466,16 +466,16 @@ void displayReadings()
   // MOTOR STATE
   // ===================================================
 
-  Serial.print("Motor       : ");
+  // Serial.print("Motor       : ");
 
-  if (motorRunning)
-  {
-    Serial.println("RUNNING");
-  }
-  else
-  {
-    Serial.println("STOPPED");
-  }
+  // if (motorRunning)
+  // {
+  //   Serial.println("RUNNING");
+  // }
+  // else
+  // {
+  //   Serial.println("STOPPED");
+  // }
 
   Serial.println("================================");
 }

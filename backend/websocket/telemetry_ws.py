@@ -63,19 +63,21 @@ async def websocket_telemetry_endpoint(websocket: WebSocket):
         # Immediately push initial hardware telemetry or connection status to the newly connected client
         try:
             from backend.services.serial_service import serial_service
-            if serial_service.latest_telemetry:
+            if serial_service.connection_status == "CONNECTED" and serial_service.latest_telemetry:
+                # Only send latest telemetry if serial is currently CONNECTED (not stale)
                 await websocket.send_text(json.dumps(serial_service.latest_telemetry, default=str))
             else:
+                # Serial is disconnected — send accurate DISCONNECTED status (never send stale telemetry)
                 from datetime import datetime, timezone
                 await websocket.send_text(json.dumps({
                     "type": "connection_status",
                     "device_id": serial_service.device_id,
                     "port": serial_service.port,
                     "baud": serial_service.baud,
-                    "connection_status": serial_service.connection_status,
+                    "connection_status": serial_service.connection_status,  # DISCONNECTED / RECONNECTING
                     "serial_status": serial_service.connection_status,
                     "websocket_status": "CONNECTED",
-                    "message": f"Connected to gateway on {serial_service.port}",
+                    "message": f"Arduino serial {serial_service.connection_status} on {serial_service.port}",
                     "timestamp": datetime.now(timezone.utc).isoformat()
                 }, default=str))
         except Exception as init_err:

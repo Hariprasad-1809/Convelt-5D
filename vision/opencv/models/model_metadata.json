@@ -14,10 +14,10 @@
     "DAMAGE"
   ],
   "num_base_images": {
-    "healthy": 1,
-    "damage": 1
+    "healthy": 10,
+    "damage": 10
   },
-  "total_training_instances": 202,
+  "total_training_instances": 2020,
   "metrics": {
     "train_accuracy": 1.0,
     "base_sample_accuracy": 1.0,
@@ -26,15 +26,15 @@
     "f1_score": 1.0,
     "confusion_matrix": [
       [
-        1,
+        10,
         0
       ],
       [
         0,
-        1
+        10
       ]
     ]
   },
-  "trained_at": "2026-09-08T16:29:12Z",
-  "warning": "WARNING: Training dataset currently contains 2 original images (1 healthy, 1 damage). Small datasets may not generalize well to new camera angles, lighting, or distances not represented in the training images."
+  "trained_at": "2026-09-22T08:38:58Z",
+  "warning": "WARNING: Training dataset currently contains 20 original images (10 healthy, 10 damage). Small datasets may not generalize well to new camera angles, lighting, or distances not represented in the training images."
 }

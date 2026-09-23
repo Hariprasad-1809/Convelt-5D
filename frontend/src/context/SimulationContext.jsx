@@ -134,6 +134,17 @@ export function SimulationProvider({ children }) {
 
   const isPollingRef = useRef(false);
 
+  // ─── Live WS Sensor Ref (authoritative, immune to React render lag) ─────────
+  // Always holds the most recently received sensor_telemetry payload from WS.
+  // REST poll reads from this ref so it never overwrites live hardware data.
+  const wsLatestRef = useRef({
+    temperature: null,
+    vibration: null,
+    hall_detected: false,
+    motor_speed: 0,
+    motor_running: false,
+    hasData: false,  // true once first real sensor_telemetry frame arrives
+  });
 
   // WebSocket Lifecycle Refs
   const wsRef = useRef(null);
@@ -181,6 +192,17 @@ export function SimulationProvider({ children }) {
 
             if (data.type === 'sensor_telemetry') {
               const serialStat = data.serial_status || data.connection_status || 'CONNECTED';
+
+              // ── Write into ref immediately (sync, no re-render delay) ──────
+              wsLatestRef.current = {
+                temperature: data.temperature ?? wsLatestRef.current.temperature,
+                vibration: data.vibration ?? wsLatestRef.current.vibration,
+                hall_detected: data.hall_detected ?? wsLatestRef.current.hall_detected,
+                motor_speed: data.motor_speed ?? wsLatestRef.current.motor_speed,
+                motor_running: data.motor_running ?? wsLatestRef.current.motor_running,
+                hasData: true,
+              };
+
               setHardwareStatus((prev) => ({
                 ...prev,
                 device_id: data.device_id || 'ARDUINO_UNO_01',
@@ -374,9 +396,11 @@ export function SimulationProvider({ children }) {
           let currentTemp = sensorData?.temperature ?? j.temperature ?? prevJoint.temperature ?? 36.5;
           let currentVib = sensorData?.vibration ?? j.vibration ?? prevJoint.vibration ?? 1.5;
 
-          if (jid === 'J01' && (hardwareStatus?.connection_status === 'CONNECTED' || hardwareStatus?.serial_status === 'CONNECTED')) {
-            if (hardwareStatus?.temperature != null) currentTemp = hardwareStatus.temperature;
-            if (hardwareStatus?.vibration != null) currentVib = hardwareStatus.vibration;
+          // ── Use live WS ref (authoritative) to override DB values for J01 ──
+          // wsLatestRef is a plain ref — always current, no stale-closure risk.
+          if (jid === 'J01' && wsLatestRef.current.hasData) {
+            if (wsLatestRef.current.temperature != null) currentTemp = wsLatestRef.current.temperature;
+            if (wsLatestRef.current.vibration != null) currentVib = wsLatestRef.current.vibration;
           }
 
           const currentRisk = j.risk_level || 'LOW';
@@ -551,7 +575,12 @@ export function SimulationProvider({ children }) {
     } finally {
       isPollingRef.current = false;
     }
-  }, [selectedJointId, joints]);
+  // NOTE: `joints` intentionally removed from deps — we use functional setJoints
+  // updaters and wsLatestRef inside this callback, so the stale closure is safe.
+  // Including `joints` caused fetchAllData to re-create on every WS update,
+  // which re-registered the polling interval and caused infinite re-renders.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedJointId]);
 
   // Polling loop
   useEffect(() => {
