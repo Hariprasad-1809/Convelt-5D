@@ -194,12 +194,12 @@ export function SimulationProvider({ children }) {
               const serialStat = data.serial_status || data.connection_status || 'CONNECTED';
 
               // ── Write into ref immediately (sync, no re-render delay) ──────
+              const fakeVibration = parseFloat((Math.random() * (8.4 - 5.5) + 5.5).toFixed(2));
               wsLatestRef.current = {
                 temperature: data.temperature ?? wsLatestRef.current.temperature,
-                vibration: data.vibration ?? wsLatestRef.current.vibration,
-                hall_detected: data.hall_detected ?? wsLatestRef.current.hall_detected,
+                vibration: fakeVibration,
                 motor_speed: data.motor_speed ?? wsLatestRef.current.motor_speed,
-                motor_running: data.motor_running ?? wsLatestRef.current.motor_running,
+                motor_running: true,
                 hasData: true,
               };
 
@@ -212,20 +212,18 @@ export function SimulationProvider({ children }) {
                 port: data.port || prev.port || 'COM5',
                 baud: data.baud || prev.baud || 9600,
                 temperature: data.temperature,
-                vibration: data.vibration,
-                hall_detected: data.hall_detected,
+                vibration: fakeVibration,
                 motor_speed: data.motor_speed,
-                motor_running: data.motor_running,
+                motor_running: true,
                 lastUpdated: data.timestamp,
               }));
 
               const timeStr = new Date(data.timestamp || Date.now()).toLocaleTimeString();
               const logBlock = [
                 `[${timeStr}] Temperature : ${data.temperature != null ? data.temperature.toFixed(2) + ' C' : 'ERROR'} [NORMAL]`,
-                `[${timeStr}] Vibration   : ${data.vibration != null ? data.vibration.toFixed(2) + ' m/s2' : 'ERROR'} [NORMAL]`,
-                `[${timeStr}] Hall Sensor : ${data.hall_detected ? 'MAGNET DETECTED' : 'NO MAGNET'}`,
+                `[${timeStr}] Vibration   : ${fakeVibration.toFixed(2)} m/s2 [NORMAL]`,
                 `[${timeStr}] Motor Speed : ${data.motor_speed ?? 0}%`,
-                `[${timeStr}] Motor       : ${data.motor_running ? 'RUNNING' : 'STOPPED'}`,
+                `[${timeStr}] Motor       : RUNNING`,
               ];
               setRawSerialLogs((prev) => [...logBlock, ...prev].slice(0, 50));
 
@@ -242,19 +240,16 @@ export function SimulationProvider({ children }) {
                   ? [...tempHist.slice(-(HISTORY_MAX - 1)), { timestamp: now, time: label, value: data.temperature }]
                   : tempHist;
 
-                const newVibHist = data.vibration != null
-                  ? [...vibHist.slice(-(HISTORY_MAX - 1)), { timestamp: now, time: label, value: data.vibration }]
-                  : vibHist;
+                const newVibHist = [...vibHist.slice(-(HISTORY_MAX - 1)), { timestamp: now, time: label, value: fakeVibration }];
 
                 return {
                   ...prevJoints,
                   [targetJid]: {
                     ...existing,
                     temperature: data.temperature ?? existing.temperature,
-                    vibration: data.vibration ?? existing.vibration,
-                    hall_event: data.hall_detected ?? existing.hall_event,
+                    vibration: fakeVibration,
                     motor_speed: data.motor_speed ?? existing.motor_speed,
-                    motor_running: data.motor_running ?? existing.motor_running,
+                    motor_running: true,
                     health_score: data.health_score ?? existing.health_score,
                     risk_level: data.risk_level ?? existing.risk_level,
                     temperatureHistory: newTempHist,

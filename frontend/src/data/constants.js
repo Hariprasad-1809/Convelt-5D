@@ -48,9 +48,9 @@ export const STATUS_TO_RISK = {
 
 // ─── Status Colors (CSS variable names for reference) ─────────────────────────
 export const STATUS_COLORS = {
-  NORMAL: '#22c55e',
-  MEDIUM: '#f59e0b',
-  HIGH:   '#ef4444',
+  NORMAL:  '#16a34a',  // darkened one shade — matches --status-normal on white bg
+  MEDIUM:  '#d97706',  // darkened one shade — matches --status-medium on white bg
+  HIGH:    '#dc2626',  // darkened one shade — matches --status-high on white bg
   UNKNOWN: '#64748b',
 };
 
